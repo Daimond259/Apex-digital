@@ -46,6 +46,14 @@ A feature-rich Discord bot for automated product distribution, ticketing, and VI
 
    > **Tip:** Set `CONFIG_PATH` and `DISCORD_TOKEN` environment variables to override the default configuration file path and token.
 
+### Running Tests
+
+Automated tests are powered by `pytest` and `pytest-asyncio`. After installing the project requirements, run:
+
+```bash
+pytest
+```
+
 ## Configuration
 
 The `config.json` file contains all bot settings:
