@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Optional
 
 import aiosqlite
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
@@ -16,6 +19,7 @@ class Database:
         self.db_path = Path(db_path)
         self._connection: Optional[aiosqlite.Connection] = None
         self._wallet_lock = asyncio.Lock()
+        self.target_schema_version = 3
 
     async def connect(self) -> None:
         if self._connection is None:
@@ -31,10 +35,84 @@ class Database:
             self._connection = None
 
     async def _initialize_schema(self) -> None:
+        """Initialize the database schema with versioning support."""
         if self._connection is None:
             raise RuntimeError("Database connection not initialized.")
 
-        # First create the basic schema if it doesn't exist
+        # Create the schema_migrations table if it doesn't exist
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        await self._connection.commit()
+
+        # Get current schema version
+        current_version = await self._get_current_schema_version()
+        logger.info(f"Current database schema version: {current_version}")
+
+        # Apply all pending migrations
+        await self._apply_pending_migrations(current_version)
+
+        # Log final version
+        final_version = await self._get_current_schema_version()
+        logger.info(f"Database schema migration complete. Final version: {final_version}")
+
+    async def _get_current_schema_version(self) -> int:
+        """Get the current schema version from the migrations table."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        cursor = await self._connection.execute(
+            "SELECT MAX(version) as version FROM schema_migrations"
+        )
+        row = await cursor.fetchone()
+        return row["version"] if row and row["version"] else 0
+
+    async def _apply_pending_migrations(self, current_version: int) -> None:
+        """Apply all pending migrations after the current version."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        # Define all migrations in order
+        migrations = {
+            1: ("base_schema", self._migration_v1),
+            2: ("migrate_products_table", self._migration_v2),
+            3: ("migrate_discounts_indexes", self._migration_v3),
+        }
+
+        for version in sorted(migrations.keys()):
+            if version > current_version:
+                name, migration_fn = migrations[version]
+                logger.info(f"Applying migration v{version}: {name}")
+                try:
+                    await migration_fn()
+                    await self._record_migration(version, name)
+                    logger.info(f"Migration v{version} applied successfully")
+                except Exception as e:
+                    logger.error(f"Failed to apply migration v{version}: {e}")
+                    raise
+
+    async def _record_migration(self, version: int, name: str) -> None:
+        """Record a migration as applied in the schema_migrations table."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        await self._connection.execute(
+            "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
+            (version, name),
+        )
+        await self._connection.commit()
+
+    async def _migration_v1(self) -> None:
+        """Migration v1: Create base schema with all core tables."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
         await self._connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -80,9 +158,6 @@ class Database:
                 FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
             );
 
-            CREATE INDEX IF NOT EXISTS idx_discounts_expires_at
-                ON discounts(expires_at);
-
             CREATE TABLE IF NOT EXISTS tickets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_discord_id INTEGER NOT NULL,
@@ -92,9 +167,6 @@ class Database:
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(user_discord_id) REFERENCES users(discord_id) ON DELETE CASCADE
             );
-
-            CREATE INDEX IF NOT EXISTS idx_tickets_user_status
-                ON tickets(user_discord_id, status);
 
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,31 +179,23 @@ class Database:
                 FOREIGN KEY(user_discord_id) REFERENCES users(discord_id) ON DELETE CASCADE,
                 FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
             );
-
-            CREATE INDEX IF NOT EXISTS idx_orders_user
-                ON orders(user_discord_id);
             """
         )
         await self._connection.commit()
-        
-        # Handle migrations
-        await self._migrate_products_table()
-        await self._migrate_discounts_indexes()
 
-    async def _migrate_products_table(self) -> None:
-        """Migrate products table to new schema if needed."""
+    async def _migration_v2(self) -> None:
+        """Migration v2: Migrate products table from old schema to new schema."""
         if self._connection is None:
             raise RuntimeError("Database connection not initialized.")
 
-        # Check if the products table has the new columns
+        # Check if the products table has the old 'name' column
         cursor = await self._connection.execute("PRAGMA table_info(products)")
         columns = [row[1] for row in await cursor.fetchall()]
-        
+
         # If the table has the old 'name' column but not the new columns, migrate it
-        if 'name' in columns and 'main_category' not in columns:
-            logger = __import__('logging').getLogger(__name__)
-            logger.info("Migrating products table to new schema...")
-            
+        if "name" in columns and "main_category" not in columns:
+            logger.info("Migrating products table from old schema...")
+
             # Create a backup of existing products
             await self._connection.execute(
                 """
@@ -139,14 +203,10 @@ class Database:
                 SELECT * FROM products
                 """
             )
-            
+
             # Create the new products table
-            await self._connection.execute(
-                """
-                DROP TABLE IF EXISTS products_new
-                """
-            )
-            
+            await self._connection.execute("DROP TABLE IF EXISTS products_new")
+
             await self._connection.execute(
                 """
                 CREATE TABLE products_new (
@@ -168,7 +228,7 @@ class Database:
                 )
                 """
             )
-            
+
             # Migrate data from old table to new table
             await self._connection.execute(
                 """
@@ -182,24 +242,35 @@ class Database:
                 FROM products
                 """
             )
-            
+
             # Drop old table and rename new one
             await self._connection.execute("DROP TABLE products")
             await self._connection.execute("ALTER TABLE products_new RENAME TO products")
-            
-            await self._connection.commit()
-            logger.info("Products table migration completed successfully.")
 
-    async def _migrate_discounts_indexes(self) -> None:
-        """Create indexes for discounts table if they don't exist."""
+            await self._connection.commit()
+            logger.info("Products table migration completed successfully")
+
+    async def _migration_v3(self) -> None:
+        """Migration v3: Create indexes for discounts and orders tables."""
         if self._connection is None:
             raise RuntimeError("Database connection not initialized.")
 
-        # Create index on expires_at for performance in discount expiry queries
         await self._connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_discounts_expires_at
                 ON discounts(expires_at)
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tickets_user_status
+                ON tickets(user_discord_id, status)
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_orders_user
+                ON orders(user_discord_id)
             """
         )
         await self._connection.commit()
