@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import discord
 from discord import app_commands
@@ -20,6 +20,34 @@ from apex_core.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _product_display_name(product: Any) -> str:
+    if not product:
+        return "Unknown Product"
+
+    getter = getattr(product, "get", None)
+    getitem = getattr(product, "__getitem__", None)
+
+    for key in ("variant_name", "service_name", "name"):
+        value = None
+
+        if callable(getter):
+            try:
+                value = getter(key)
+            except Exception:
+                value = None
+
+        if value is None and callable(getitem):
+            try:
+                value = getitem(key)
+            except (KeyError, TypeError, IndexError):
+                value = None
+
+        if value:
+            return str(value)
+
+    return "Unknown Product"
 
 
 # ============================================================================
@@ -312,8 +340,8 @@ class ProductSelect(discord.ui.Select["ProductSelectView"]):
         )
         final_price_cents = int(base_price_cents * (1 - discount_percent / 100))
 
-        # Use variant_name for new products, fallback to name for legacy products
-        product_name = product.get("variant_name", product.get("name", "Unknown Product"))
+        # Determine the appropriate display name for the product
+        product_name = _product_display_name(product)
         
         embed = create_embed(
             title=product_name,
@@ -341,7 +369,7 @@ class ProductSelectView(discord.ui.View):
         if products:
             select.options = [
                 discord.SelectOption(
-                    label=product.get("variant_name", product.get("name", "Unknown Product"))[:100],
+                    label=_product_display_name(product)[:100],
                     value=str(product["id"]),
                     description=f"{format_usd(product['price_cents'])} • ID: {product['id']}"[:100],
                 )
@@ -779,7 +807,7 @@ class StorefrontCog(commands.Cog):
             )
             return
 
-        product_name = product.get("variant_name", product.get("name", "Unknown Product"))
+        product_name = _product_display_name(product)
         modal = PurchaseConfirmModal(product_id, product_name, final_price_cents)
         await interaction.response.send_modal(modal)
 
@@ -829,7 +857,7 @@ class StorefrontCog(commands.Cog):
             )
             return
 
-        product_name = product.get("variant_name", product.get("name", "Unknown Product"))
+        product_name = _product_display_name(product)
         try:
             order_metadata = json.dumps({
                 "product_name": product_name,
@@ -862,7 +890,7 @@ class StorefrontCog(commands.Cog):
             role = interaction.guild.get_role(product["role_id"]) if interaction.guild else None
             if role:
                 try:
-                    await member.add_roles(role, reason=f"Purchased {product['name']}")
+                    await member.add_roles(role, reason=f"Purchased {product_name}")
                 except discord.HTTPException as e:
                     logger.error("Failed to assign role %s to user %s: %s", role.id, member.id, e)
 
@@ -1034,11 +1062,13 @@ class StorefrontCog(commands.Cog):
                 read_message_history=True,
             )
 
+        product_name = _product_display_name(product)
+
         try:
             channel = await category.create_text_channel(
                 name=channel_name,
                 overwrites=overwrites,
-                reason=f"Support ticket for {product['name']} by {member.display_name}",
+                reason=f"Support ticket for {product_name} by {member.display_name}",
             )
         except discord.HTTPException as error:
             logger.error("Failed to create support ticket: %s", error)
@@ -1048,7 +1078,6 @@ class StorefrontCog(commands.Cog):
             )
             return
 
-        product_name = product.get("variant_name", product.get("name", "Unknown Product"))
         embed = create_embed(
             title="Support Ticket",
             description=(
