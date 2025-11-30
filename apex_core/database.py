@@ -80,6 +80,9 @@ class Database:
                 FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
             );
 
+            CREATE INDEX IF NOT EXISTS idx_discounts_expires_at
+                ON discounts(expires_at);
+
             CREATE TABLE IF NOT EXISTS tickets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_discord_id INTEGER NOT NULL,
@@ -111,8 +114,9 @@ class Database:
         )
         await self._connection.commit()
         
-        # Handle migration for products table
+        # Handle migrations
         await self._migrate_products_table()
+        await self._migrate_discounts_indexes()
 
     async def _migrate_products_table(self) -> None:
         """Migrate products table to new schema if needed."""
@@ -185,6 +189,20 @@ class Database:
             
             await self._connection.commit()
             logger.info("Products table migration completed successfully.")
+
+    async def _migrate_discounts_indexes(self) -> None:
+        """Create indexes for discounts table if they don't exist."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        # Create index on expires_at for performance in discount expiry queries
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_discounts_expires_at
+                ON discounts(expires_at)
+            """
+        )
+        await self._connection.commit()
 
     async def ensure_user(self, discord_id: int) -> aiosqlite.Row:
         if self._connection is None:
@@ -353,6 +371,11 @@ class Database:
         product_id: Optional[int],
         vip_tier: Optional[str],
     ) -> list[aiosqlite.Row]:
+        """Get applicable discounts, filtering out expired ones.
+        
+        Returns discounts that match the user, product, and VIP tier criteria,
+        but only those that haven't expired (expires_at is NULL or in the future).
+        """
         if self._connection is None:
             raise RuntimeError("Database connection not initialized.")
 
@@ -362,6 +385,7 @@ class Database:
             WHERE (user_id IS NULL OR user_id = ?)
               AND (product_id IS NULL OR product_id = ?)
               AND (vip_tier IS NULL OR vip_tier = ?)
+              AND (expires_at IS NULL OR expires_at >= CURRENT_TIMESTAMP)
             """,
             (user_id, product_id, vip_tier),
         )
