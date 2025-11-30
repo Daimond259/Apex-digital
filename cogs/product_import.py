@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import logging
@@ -12,6 +13,96 @@ from discord.ext import commands
 from apex_core.utils import create_embed, format_usd
 
 logger = logging.getLogger(__name__)
+
+MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
+
+
+def _parse_and_validate_csv(file_content: bytes) -> dict:
+    """Parse and validate CSV file content. Runs in a thread executor.
+    
+    Returns:
+        Dict with 'success' bool and either 'rows' or 'error' key.
+        'rows' contains validated row data ready for DB lookups.
+    """
+    try:
+        try:
+            csv_text = file_content.decode('utf-8')
+        except UnicodeDecodeError:
+            csv_text = file_content.decode('latin-1')
+        
+        csv_reader = csv.DictReader(io.StringIO(csv_text))
+        
+        required_columns = [
+            'Main_Category', 'Sub_Category', 'Service_Name', 
+            'Variant_Name', 'Price_USD', 'Start_Time', 
+            'Duration', 'Refill_Period', 'Additional_Info'
+        ]
+        
+        if not csv_reader.fieldnames:
+            return {'success': False, 'error': 'CSV file appears to be empty or invalid.'}
+        
+        missing_columns = [col for col in required_columns if col not in csv_reader.fieldnames]
+        if missing_columns:
+            return {
+                'success': False,
+                'error': f"Missing required columns: {', '.join(missing_columns)}"
+            }
+        
+        validated_rows = []
+        errors = []
+        
+        for row_num, row in enumerate(csv_reader, start=2):
+            try:
+                main_category = row['Main_Category'].strip()
+                sub_category = row['Sub_Category'].strip()
+                service_name = row['Service_Name'].strip()
+                variant_name = row['Variant_Name'].strip()
+                
+                if not all([main_category, sub_category, service_name, variant_name]):
+                    errors.append(f"Row {row_num}: Missing required field values")
+                    continue
+                
+                price_usd_str = row['Price_USD'].strip()
+                try:
+                    price_usd = float(price_usd_str)
+                    if price_usd < 0:
+                        errors.append(f"Row {row_num}: Price cannot be negative")
+                        continue
+                    price_cents = int(round(price_usd * 100))
+                except ValueError:
+                    errors.append(f"Row {row_num}: Invalid price format '{price_usd_str}'")
+                    continue
+                
+                start_time = row['Start_Time'].strip() or None
+                duration = row['Duration'].strip() or None
+                refill_period = row['Refill_Period'].strip() or None
+                additional_info = row['Additional_Info'].strip() or None
+                
+                validated_rows.append({
+                    'main_category': main_category,
+                    'sub_category': sub_category,
+                    'service_name': service_name,
+                    'variant_name': variant_name,
+                    'price_cents': price_cents,
+                    'start_time': start_time,
+                    'duration': duration,
+                    'refill_period': refill_period,
+                    'additional_info': additional_info,
+                })
+            
+            except Exception as e:
+                logger.error("Error processing row %d: %s", row_num, e)
+                errors.append(f"Row {row_num}: {str(e)}")
+        
+        return {
+            'success': True,
+            'rows': validated_rows,
+            'errors': errors,
+        }
+    
+    except Exception as e:
+        logger.error("CSV parsing failed: %s", e)
+        return {'success': False, 'error': f"Failed to parse CSV: {str(e)}"}
 
 
 class ProductImportCog(commands.Cog):
@@ -53,7 +144,6 @@ class ProductImportCog(commands.Cog):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        # Validate file type
         if not csv_file.filename.lower().endswith('.csv'):
             await interaction.followup.send(
                 "❌ Invalid file format. Please upload a CSV file.", ephemeral=True
@@ -61,132 +151,74 @@ class ProductImportCog(commands.Cog):
             return
 
         try:
-            # Download file content
             file_content = await csv_file.read()
             
-            # Try to decode as UTF-8, fallback to latin-1 if needed
-            try:
-                csv_text = file_content.decode('utf-8')
-            except UnicodeDecodeError:
-                csv_text = file_content.decode('latin-1')
-            
-            # Parse CSV
-            csv_reader = csv.DictReader(io.StringIO(csv_text))
-            
-            # Validate required columns
-            required_columns = [
-                'Main_Category', 'Sub_Category', 'Service_Name', 
-                'Variant_Name', 'Price_USD', 'Start_Time', 
-                'Duration', 'Refill_Period', 'Additional_Info'
-            ]
-            
-            if not csv_reader.fieldnames:
+            if len(file_content) > MAX_FILE_SIZE_BYTES:
+                file_size_mb = len(file_content) / (1024 * 1024)
+                max_size_mb = MAX_FILE_SIZE_BYTES / (1024 * 1024)
+                logger.warning(
+                    "CSV import rejected - file too large: %.2f MB (max: %.2f MB) from user %s",
+                    file_size_mb, max_size_mb, interaction.user.id
+                )
                 await interaction.followup.send(
-                    "❌ CSV file appears to be empty or invalid.", ephemeral=True
+                    f"❌ File too large: {file_size_mb:.2f} MB. Maximum allowed: {max_size_mb:.0f} MB",
+                    ephemeral=True
                 )
                 return
             
-            missing_columns = [col for col in required_columns if col not in csv_reader.fieldnames]
-            if missing_columns:
+            parse_result = await asyncio.to_thread(_parse_and_validate_csv, file_content)
+            
+            if not parse_result['success']:
+                error_msg = parse_result['error']
+                logger.warning("CSV validation failed: %s", error_msg)
                 await interaction.followup.send(
-                    f"❌ Missing required columns: {', '.join(missing_columns)}\n\n"
-                    f"Required columns: {', '.join(required_columns)}", ephemeral=True
+                    f"❌ {error_msg}", ephemeral=True
                 )
                 return
             
-            # Process products
-            added_count = 0
-            updated_count = 0
-            skipped_count = 0
+            validated_rows = parse_result['rows']
+            validation_errors = parse_result['errors']
+            
+            if not validated_rows and not validation_errors:
+                await interaction.followup.send(
+                    "❌ CSV file is empty or contains no valid rows.", ephemeral=True
+                )
+                return
+            
+            products_to_add = []
+            products_to_update = []
             active_product_ids = []
-            errors = []
+            skipped_count = len(validation_errors)
             
-            for row_num, row in enumerate(csv_reader, start=2):  # Start at 2 to account for header
-                try:
-                    # Extract and validate data
-                    main_category = row['Main_Category'].strip()
-                    sub_category = row['Sub_Category'].strip()
-                    service_name = row['Service_Name'].strip()
-                    variant_name = row['Variant_Name'].strip()
-                    
-                    if not all([main_category, sub_category, service_name, variant_name]):
-                        errors.append(f"Row {row_num}: Missing required field values")
-                        skipped_count += 1
-                        continue
-                    
-                    # Parse price
-                    price_usd_str = row['Price_USD'].strip()
-                    try:
-                        price_usd = float(price_usd_str)
-                        if price_usd < 0:
-                            errors.append(f"Row {row_num}: Price cannot be negative")
-                            skipped_count += 1
-                            continue
-                        price_cents = int(round(price_usd * 100))
-                    except ValueError:
-                        errors.append(f"Row {row_num}: Invalid price format '{price_usd_str}'")
-                        skipped_count += 1
-                        continue
-                    
-                    # Extract optional fields
-                    start_time = row['Start_Time'].strip() or None
-                    duration = row['Duration'].strip() or None
-                    refill_period = row['Refill_Period'].strip() or None
-                    additional_info = row['Additional_Info'].strip() or None
-                    
-                    # Check if product exists
-                    existing_product = await self.bot.db.find_product_by_fields(
-                        main_category=main_category,
-                        sub_category=sub_category,
-                        service_name=service_name,
-                        variant_name=variant_name,
-                    )
-                    
-                    if existing_product:
-                        # Update existing product
-                        await self.bot.db.update_product(
-                            existing_product['id'],
-                            price_cents=price_cents,
-                            start_time=start_time,
-                            duration=duration,
-                            refill_period=refill_period,
-                            additional_info=additional_info,
-                            is_active=True,
-                        )
-                        updated_count += 1
-                        active_product_ids.append(existing_product['id'])
-                    else:
-                        # Create new product
-                        product_id = await self.bot.db.create_product(
-                            main_category=main_category,
-                            sub_category=sub_category,
-                            service_name=service_name,
-                            variant_name=variant_name,
-                            price_cents=price_cents,
-                            start_time=start_time,
-                            duration=duration,
-                            refill_period=refill_period,
-                            additional_info=additional_info,
-                        )
-                        added_count += 1
-                        active_product_ids.append(product_id)
+            for row in validated_rows:
+                existing_product = await self.bot.db.find_product_by_fields(
+                    main_category=row['main_category'],
+                    sub_category=row['sub_category'],
+                    service_name=row['service_name'],
+                    variant_name=row['variant_name'],
+                )
                 
-                except Exception as e:
-                    logger.error("Error processing row %d: %s", row_num, e)
-                    errors.append(f"Row {row_num}: {str(e)}")
-                    skipped_count += 1
-                    continue
+                if existing_product:
+                    products_to_update.append({
+                        'id': existing_product['id'],
+                        'price_cents': row['price_cents'],
+                        'start_time': row['start_time'],
+                        'duration': row['duration'],
+                        'refill_period': row['refill_period'],
+                        'additional_info': row['additional_info'],
+                        'is_active': 1,
+                    })
+                    active_product_ids.append(existing_product['id'])
+                else:
+                    products_to_add.append(row)
             
-            # Soft delete products not in this import
-            deactivated_count = 0
-            if active_product_ids:
-                deactivated_count = await self.bot.db.deactivate_all_products_except(active_product_ids)
+            added_count, updated_count, deactivated_count = await self.bot.db.bulk_upsert_products(
+                products_to_add, products_to_update, active_product_ids
+            )
             
-            # Get total product count
             all_products = await self.bot.db.get_all_products(active_only=True)
             total_active = len(all_products)
             
-            # Create result embed
             embed = create_embed(
                 title="✅ Import Successful",
                 description=(
@@ -200,25 +232,24 @@ class ProductImportCog(commands.Cog):
             
             if skipped_count > 0:
                 embed.add_field(
-                    name="⚠️ Skipped Rows",
-                    value=f"{skipped_count} rows had errors and were skipped",
+                    name="⚠️ Validation Errors",
+                    value=f"{skipped_count} rows had validation errors",
                     inline=False,
                 )
             
-            if errors and len(errors) <= 5:
+            if validation_errors and len(validation_errors) <= 5:
                 embed.add_field(
-                    name="📋 Errors",
-                    value="\n".join(errors[:5]),
+                    name="📋 Error Details",
+                    value="\n".join(validation_errors[:5]),
                     inline=False,
                 )
-            elif errors:
+            elif validation_errors:
                 embed.add_field(
-                    name="📋 Errors",
-                    value=f"{len(errors)} errors occurred. First few:\n" + "\n".join(errors[:3]),
+                    name="📋 Error Details",
+                    value=f"{len(validation_errors)} errors occurred. First few:\n" + "\n".join(validation_errors[:3]),
                     inline=False,
                 )
             
-            # Add template note if it exists
             try:
                 import os
                 template_path = "/home/engine/project/templates/products_template.xlsx"
@@ -229,11 +260,10 @@ class ProductImportCog(commands.Cog):
                         inline=False,
                     )
             except Exception:
-                pass  # Ignore template check errors
+                pass
             
             await interaction.followup.send(embed=embed, ephemeral=True)
             
-            # Log to order_logs channel for audit trail
             if interaction.guild:
                 log_channel_id = self.bot.config.logging_channels.order_logs
                 if log_channel_id:
@@ -247,15 +277,15 @@ class ProductImportCog(commands.Cog):
                                 f"**Added:** {added_count}\n"
                                 f"**Updated:** {updated_count}\n"
                                 f"**Deactivated:** {deactivated_count}\n"
-                                f"**Skipped:** {skipped_count}\n"
+                                f"**Validation Errors:** {skipped_count}\n"
                                 f"**Total Active:** {total_active}"
                             ),
                             color=discord.Color.blue(),
                         )
-                        if errors:
+                        if validation_errors:
                             log_embed.add_field(
                                 name="Errors Summary",
-                                value=f"{len(errors)} errors occurred during import",
+                                value=f"{len(validation_errors)} validation errors during import",
                                 inline=False,
                             )
                         
