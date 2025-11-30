@@ -499,6 +499,13 @@ class StorefrontCog(commands.Cog):
     async def _calculate_discount(
         self, user_id: int, product_id: int, vip_tier: Optional[object]
     ) -> float:
+        """Calculate total discount for a user, enforcing discount expiry.
+        
+        This method calculates discounts from both role-based and legacy discount systems.
+        As a defensive measure, it filters out any expired discounts even though the
+        database query should already exclude them, ensuring expired discounts can
+        never be applied.
+        """
         from apex_core.utils.roles import get_user_roles
         
         total_discount = 0.0
@@ -520,6 +527,17 @@ class StorefrontCog(commands.Cog):
         )
 
         for discount in discounts:
+            # Defensive check: ensure discount hasn't expired
+            if discount["expires_at"]:
+                try:
+                    from datetime import datetime
+                    expires_at = datetime.fromisoformat(discount["expires_at"])
+                    if expires_at < datetime.now():
+                        continue  # Skip expired discount
+                except (ValueError, TypeError):
+                    # If we can't parse the date, skip it for safety
+                    continue
+            
             if discount["is_stackable"]:
                 total_discount += discount["discount_percent"]
             else:
