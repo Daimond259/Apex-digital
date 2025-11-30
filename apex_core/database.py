@@ -946,6 +946,100 @@ class Database:
             
             return order_id, new_lifetime_spend
 
+    async def bulk_upsert_products(
+        self,
+        products_to_add: list[dict],
+        products_to_update: list[dict],
+        product_ids_to_keep_active: list[int],
+    ) -> tuple[int, int, int]:
+        """Perform bulk insert/update/deactivate of products in a single transaction.
+
+        Args:
+            products_to_add: List of dicts with fields for new products
+            products_to_update: List of dicts with 'id' and update fields
+            product_ids_to_keep_active: List of product IDs to keep active (others deactivated)
+
+        Returns:
+            Tuple of (added_count, updated_count, deactivated_count)
+        """
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        await self._connection.execute("BEGIN IMMEDIATE;")
+        try:
+            added_count = 0
+            updated_count = 0
+            deactivated_count = 0
+
+            for product in products_to_add:
+                await self._connection.execute(
+                    """
+                    INSERT INTO products (
+                        main_category, sub_category, service_name, variant_name,
+                        price_cents, start_time, duration, refill_period, additional_info,
+                        role_id, content_payload
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        product.get('main_category'),
+                        product.get('sub_category'),
+                        product.get('service_name'),
+                        product.get('variant_name'),
+                        product.get('price_cents'),
+                        product.get('start_time'),
+                        product.get('duration'),
+                        product.get('refill_period'),
+                        product.get('additional_info'),
+                        product.get('role_id'),
+                        product.get('content_payload'),
+                    ),
+                )
+                added_count += 1
+
+            for product in products_to_update:
+                product_id = product.pop('id')
+                update_fields = []
+                params = []
+
+                for field, value in product.items():
+                    if value is not None:
+                        update_fields.append(f"{field} = ?")
+                        params.append(value)
+
+                if update_fields:
+                    update_fields.append("updated_at = CURRENT_TIMESTAMP")
+                    params.append(product_id)
+
+                    query = f"""
+                        UPDATE products
+                        SET {', '.join(update_fields)}
+                        WHERE id = ?
+                    """
+                    await self._connection.execute(query, params)
+                    updated_count += 1
+
+            if not product_ids_to_keep_active:
+                cursor = await self._connection.execute(
+                    "UPDATE products SET is_active = 0, updated_at = CURRENT_TIMESTAMP"
+                )
+            else:
+                placeholders = ','.join('?' for _ in product_ids_to_keep_active)
+                cursor = await self._connection.execute(
+                    f"""
+                    UPDATE products
+                    SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+                    WHERE id NOT IN ({placeholders})
+                    """,
+                    product_ids_to_keep_active,
+                )
+            deactivated_count = cursor.rowcount
+
+            await self._connection.commit()
+            return added_count, updated_count, deactivated_count
+        except Exception:
+            await self._connection.rollback()
+            raise
+
     async def purchase_product(
         self,
         *,
@@ -960,7 +1054,7 @@ class Database:
 
         async with self._wallet_lock:
             await self._connection.execute("BEGIN IMMEDIATE;")
-            
+
             cursor = await self._connection.execute(
                 "SELECT wallet_balance_cents FROM users WHERE discord_id = ?",
                 (user_discord_id,),
@@ -969,12 +1063,12 @@ class Database:
             if row is None:
                 await self._connection.rollback()
                 raise ValueError("User not found")
-            
+
             current_balance = row["wallet_balance_cents"]
             if current_balance < price_paid_cents:
                 await self._connection.rollback()
                 raise ValueError("Insufficient balance")
-            
+
             await self._connection.execute(
                 """
                 UPDATE users
@@ -985,7 +1079,7 @@ class Database:
                 """,
                 (price_paid_cents, price_paid_cents, user_discord_id),
             )
-            
+
             cursor = await self._connection.execute(
                 """
                 INSERT INTO orders (
@@ -1002,14 +1096,14 @@ class Database:
                 ),
             )
             order_id = cursor.lastrowid
-            
+
             await self._connection.commit()
-            
+
             cursor = await self._connection.execute(
                 "SELECT wallet_balance_cents FROM users WHERE discord_id = ?",
                 (user_discord_id,),
             )
             row = await cursor.fetchone()
             new_balance = row["wallet_balance_cents"] if row else 0
-            
+
             return order_id, new_balance
