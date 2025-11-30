@@ -1,0 +1,67 @@
+# Apex Core Discord Bot - systemd service unit
+#
+# Installation Instructions:
+# 1. Copy this file to /etc/systemd/system/apex-core.service
+#    sudo cp apex-core.service /etc/systemd/system/
+#
+# 2. Create a dedicated user for the bot (recommended):
+#    sudo useradd -r -s /bin/false apexcore
+#
+# 3. Set proper ownership of the bot directory:
+#    sudo chown -R apexcore:apexcore /opt/apex-core
+#
+# 4. Create an environment file at /etc/apex-core/environment with:
+#    DISCORD_TOKEN=your_bot_token_here
+#    CONFIG_PATH=/opt/apex-core/config.json
+#
+# 5. Reload systemd and enable the service:
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable apex-core.service
+#    sudo systemctl start apex-core.service
+#
+# 6. Check service status:
+#    sudo systemctl status apex-core.service
+#
+# 7. View logs:
+#    sudo journalctl -u apex-core.service -f
+
+[Unit]
+Description=Apex Core Discord Bot
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=apexcore
+Group=apexcore
+WorkingDirectory=/opt/apex-core
+EnvironmentFile=/etc/apex-core/environment
+
+# Python virtual environment activation and bot execution
+ExecStart=/opt/apex-core/venv/bin/python3 bot.py
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/apex-core
+CapabilityBoundingSet=
+
+# Resource limits
+LimitNOFILE=4096
+MemoryMax=512M
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=apex-core
+
+[Install]
+WantedBy=multi-user.target

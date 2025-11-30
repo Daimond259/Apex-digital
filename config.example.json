@@ -1,0 +1,159 @@
+{
+  "token": "YOUR_DISCORD_BOT_TOKEN_HERE",
+  "bot_prefix": "!",
+  "guild_ids": [
+    123456789012345678,
+    987654321098765432
+  ],
+  "role_ids": {
+    "admin": 123456789012345678
+  },
+  "ticket_categories": {
+    "support": 111111111111111111,
+    "billing": 222222222222222222,
+    "sales": 333333333333333333
+  },
+  "operating_hours": {
+    "start_hour_utc": 10,
+    "end_hour_utc": 22
+  },
+  "payment_methods": [
+    {
+      "name": "Binance Pay",
+      "instructions": "Send the desired USD amount via Binance Pay and include your Discord username in the note field.",
+      "emoji": "🟡",
+      "metadata": {
+        "pay_id": "1234567890",
+        "reference": "Use your Discord username",
+        "url": "https://pay.binance.com/en"
+      }
+    },
+    {
+      "name": "Tip.cc",
+      "instructions": "Use Tip.cc to send a tip to @ApexCore. Include the ticket channel link in your tip message.",
+      "emoji": "🤖",
+      "metadata": {
+        "command": "/tip 25 @ApexCore",
+        "url": "https://tip.cc"
+      }
+    },
+    {
+      "name": "Crypto Address",
+      "instructions": "Send USDT (TRC20) to the wallet below and reply in this ticket with the transaction hash.",
+      "emoji": "🪙",
+      "metadata": {
+        "network": "TRON (TRC20)",
+        "address": "TD1ExampleWalletAddress000000000000"
+      }
+    }
+  ],
+  "roles": [
+    {
+      "name": "Client",
+      "role_id": 111111111111111111,
+      "assignment_mode": "automatic_first_purchase",
+      "unlock_condition": "first_purchase",
+      "discount_percent": 0.0,
+      "benefits": [
+        "Priority access to new products"
+      ],
+      "tier_priority": 0
+    },
+    {
+      "name": "Apex VIP",
+      "role_id": 222222222222222222,
+      "assignment_mode": "automatic_spend",
+      "unlock_condition": 5000,
+      "discount_percent": 1.5,
+      "benefits": [
+        "Priority access to new products"
+      ],
+      "tier_priority": 1
+    },
+    {
+      "name": "Apex Elite",
+      "role_id": 333333333333333333,
+      "assignment_mode": "automatic_spend",
+      "unlock_condition": 10000,
+      "discount_percent": 2.5,
+      "benefits": [
+        "Priority access to new products"
+      ],
+      "tier_priority": 2
+    },
+    {
+      "name": "Apex Legend",
+      "role_id": 444444444444444444,
+      "assignment_mode": "automatic_spend",
+      "unlock_condition": 50000,
+      "discount_percent": 3.75,
+      "benefits": [
+        "Priority access to new products"
+      ],
+      "tier_priority": 3
+    },
+    {
+      "name": "Apex Sovereign",
+      "role_id": 555555555555555555,
+      "assignment_mode": "automatic_spend",
+      "unlock_condition": 100000,
+      "discount_percent": 5.0,
+      "benefits": [
+        "Priority access to new products"
+      ],
+      "tier_priority": 4
+    },
+    {
+      "name": "Apex Donor",
+      "role_id": 666666666666666666,
+      "assignment_mode": "manual",
+      "unlock_condition": 700,
+      "discount_percent": 0.25,
+      "benefits": [
+        "Community contributor recognition"
+      ],
+      "tier_priority": 5
+    },
+    {
+      "name": "Legendary Donor",
+      "role_id": 777777777777777777,
+      "assignment_mode": "manual",
+      "unlock_condition": 3000,
+      "discount_percent": 1.5,
+      "benefits": [
+        "Community contributor recognition"
+      ],
+      "tier_priority": 6
+    },
+    {
+      "name": "Apex Insider",
+      "role_id": 888888888888888888,
+      "assignment_mode": "manual",
+      "unlock_condition": 0,
+      "discount_percent": 0.5,
+      "benefits": [
+        "Recognized reviewer status"
+      ],
+      "tier_priority": 7
+    },
+    {
+      "name": "Apex Zenith",
+      "role_id": 999999999999999999,
+      "assignment_mode": "automatic_all_ranks",
+      "unlock_condition": "all_other_ranks",
+      "discount_percent": 7.5,
+      "benefits": [
+        "Ultimate apex member status"
+      ],
+      "tier_priority": 8
+    }
+  ],
+  "logging_channels": {
+    "audit": 444444444444444444,
+    "payments": 555555555555555555,
+    "tickets": 666666666666666666,
+    "errors": 777777777777777777,
+    "order_logs": 888888888888888888,
+    "transcript_archive": 999999999999999999
+  }
+}
