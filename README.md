@@ -82,23 +82,77 @@ apex-core/
     └── __init__.py
 ```
 
-## Database Schema
+## Database Schema and Migrations
+
+### Schema Versioning
+
+The bot uses a schema versioning system to manage database structural changes safely. A `schema_migrations` table tracks all applied migrations, ensuring:
+
+- **New installations** apply all migrations in order and reach the latest schema version
+- **Existing installations** apply only pending migrations and skip already-applied ones
+- **No duplications**: Each migration is recorded and only runs once
+
+#### Viewing Migration Status
+
+The bot logs migration progress on startup:
+
+```
+INFO:apex_core.database:Current database schema version: 2
+INFO:apex_core.database:Applying migration v3: migrate_discounts_indexes
+INFO:apex_core.database:Migration v3 applied successfully
+INFO:apex_core.database:Database schema migration complete. Final version: 3
+```
+
+#### Adding New Migrations
+
+To add a new migration:
+
+1. Create a new migration method in `apex_core/database.py` with the pattern `async def _migration_vN(self):`
+2. Increment `self.target_schema_version` in the `Database.__init__` method
+3. Add the migration to the `migrations` dict in `_apply_pending_migrations` with the format `N: ("migration_name", self._migration_vN)`
+4. The bot will automatically detect and apply the migration on next startup
+
+Example migration:
+
+```python
+async def _migration_v4(self) -> None:
+    """Migration v4: Add new column to users table."""
+    if self._connection is None:
+        raise RuntimeError("Database connection not initialized.")
+    
+    await self._connection.execute("ALTER TABLE users ADD COLUMN new_field TEXT")
+    await self._connection.commit()
+```
+
+### Current Schema Versions
+
+- **Version 1**: Base schema (users, products, discounts, tickets, orders tables)
+- **Version 2**: Migrate products table from old single-name schema to categorized schema
+- **Version 3**: Create performance indexes on discounts, tickets, and orders tables
 
 ### Users Table
 - `id`: Primary key
 - `discord_id`: Unique Discord user ID
 - `wallet_balance_cents`: Current wallet balance in cents
 - `total_lifetime_spent_cents`: Total amount spent lifetime
-- `vip_tier`: Current VIP tier (tier1, tier2, tier3, or NULL)
+- `has_client_role`: Whether user has the client role assigned
+- `manually_assigned_roles`: JSON list of manually assigned role names
 - `created_at`: Account creation timestamp
 - `updated_at`: Last update timestamp
 
 ### Products Table
 - `id`: Primary key
-- `name`: Product name
+- `main_category`: Main category (e.g., Instagram, YouTube)
+- `sub_category`: Sub-category (e.g., Followers, Likes)
+- `service_name`: Service grouping name
+- `variant_name`: Product display name
 - `price_cents`: Price in cents
+- `start_time`: Delivery start time
+- `duration`: Delivery duration
+- `refill_period`: Guarantee/refill period
+- `additional_info`: Extra product information
 - `role_id`: Discord role ID to assign on purchase
-- `content_payload`: Content URL or instructions
+- `content_payload`: Content URL or delivery instructions
 - `is_active`: Whether product is available for purchase
 - `created_at`: Product creation timestamp
 - `updated_at`: Last update timestamp
@@ -113,6 +167,23 @@ apex-core/
 - `expires_at`: Expiration timestamp (NULL for no expiration)
 - `is_stackable`: Whether discount can stack with others
 - `created_at`: Discount creation timestamp
+
+### Tickets Table
+- `id`: Primary key
+- `user_discord_id`: Discord ID of ticket creator
+- `channel_id`: Discord channel ID (unique per ticket)
+- `status`: Ticket status (open, closed, etc.)
+- `last_activity`: Last activity timestamp
+- `created_at`: Ticket creation timestamp
+
+### Orders Table
+- `id`: Primary key
+- `user_discord_id`: Discord ID of purchaser
+- `product_id`: Product ID (0 for manual orders)
+- `price_paid_cents`: Amount paid in cents
+- `discount_applied_percent`: Discount percentage applied
+- `order_metadata`: JSON metadata about the order
+- `created_at`: Order creation timestamp
 
 ## Product Management
 
