@@ -366,6 +366,15 @@ class WalletCog(commands.Cog):
         await self.bot.db.ensure_user(member.id)
         new_balance_cents = await self.bot.db.update_wallet_balance(member.id, cents)
 
+        await self.bot.db.log_wallet_transaction(
+            user_discord_id=member.id,
+            amount_cents=cents,
+            balance_after_cents=new_balance_cents,
+            transaction_type="admin_credit",
+            description=reason,
+            staff_discord_id=requester.id if requester else None,
+        )
+
         amount_str = format_usd(cents)
         new_balance_str = format_usd(new_balance_cents)
 

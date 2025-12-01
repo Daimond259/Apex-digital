@@ -19,7 +19,7 @@ class Database:
         self.db_path = Path(db_path)
         self._connection: Optional[aiosqlite.Connection] = None
         self._wallet_lock = asyncio.Lock()
-        self.target_schema_version = 4
+        self.target_schema_version = 5
 
     async def connect(self) -> None:
         if self._connection is None:
@@ -84,6 +84,7 @@ class Database:
             2: ("migrate_products_table", self._migration_v2),
             3: ("migrate_discounts_indexes", self._migration_v3),
             4: ("extend_tickets_schema", self._migration_v4),
+            5: ("wallet_transactions_table", self._migration_v5),
         }
 
         for version in sorted(migrations.keys()):
@@ -311,6 +312,48 @@ class Database:
 
         await self._connection.commit()
 
+    async def _migration_v5(self) -> None:
+        """Migration v5: Create wallet_transactions table for ledger tracking."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wallet_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_discord_id INTEGER NOT NULL,
+                amount_cents INTEGER NOT NULL,
+                balance_after_cents INTEGER NOT NULL,
+                transaction_type TEXT NOT NULL,
+                description TEXT,
+                order_id INTEGER,
+                ticket_id INTEGER,
+                staff_discord_id INTEGER,
+                metadata TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_discord_id) REFERENCES users(discord_id) ON DELETE CASCADE,
+                FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE SET NULL,
+                FOREIGN KEY(ticket_id) REFERENCES tickets(id) ON DELETE SET NULL
+            )
+            """
+        )
+
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user
+                ON wallet_transactions(user_discord_id, created_at DESC)
+            """
+        )
+
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_wallet_transactions_type
+                ON wallet_transactions(transaction_type)
+            """
+        )
+
+        await self._connection.commit()
+
     async def ensure_user(self, discord_id: int) -> aiosqlite.Row:
         if self._connection is None:
             raise RuntimeError("Database connection not initialized.")
@@ -374,6 +417,80 @@ class Database:
             )
             row = await cursor.fetchone()
             return row["wallet_balance_cents"] if row else 0
+
+    async def log_wallet_transaction(
+        self,
+        *,
+        user_discord_id: int,
+        amount_cents: int,
+        balance_after_cents: int,
+        transaction_type: str,
+        description: Optional[str] = None,
+        order_id: Optional[int] = None,
+        ticket_id: Optional[int] = None,
+        staff_discord_id: Optional[int] = None,
+        metadata: Optional[str] = None,
+    ) -> int:
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        cursor = await self._connection.execute(
+            """
+            INSERT INTO wallet_transactions (
+                user_discord_id, amount_cents, balance_after_cents,
+                transaction_type, description, order_id, ticket_id,
+                staff_discord_id, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_discord_id,
+                amount_cents,
+                balance_after_cents,
+                transaction_type,
+                description,
+                order_id,
+                ticket_id,
+                staff_discord_id,
+                metadata,
+            ),
+        )
+        await self._connection.commit()
+        return cursor.lastrowid
+
+    async def get_wallet_transactions(
+        self,
+        user_discord_id: int,
+        *,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> list[aiosqlite.Row]:
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        cursor = await self._connection.execute(
+            """
+            SELECT * FROM wallet_transactions
+            WHERE user_discord_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (user_discord_id, limit, offset),
+        )
+        return await cursor.fetchall()
+
+    async def count_wallet_transactions(self, user_discord_id: int) -> int:
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        cursor = await self._connection.execute(
+            """
+            SELECT COUNT(*) as count FROM wallet_transactions
+            WHERE user_discord_id = ?
+            """,
+            (user_discord_id,),
+        )
+        row = await cursor.fetchone()
+        return row["count"] if row else 0
 
     async def create_product(
         self,
@@ -1201,8 +1318,6 @@ class Database:
             )
             order_id = cursor.lastrowid
 
-            await self._connection.commit()
-
             cursor = await self._connection.execute(
                 "SELECT wallet_balance_cents FROM users WHERE discord_id = ?",
                 (user_discord_id,),
@@ -1210,4 +1325,79 @@ class Database:
             row = await cursor.fetchone()
             new_balance = row["wallet_balance_cents"] if row else 0
 
+            await self._connection.execute(
+                """
+                INSERT INTO wallet_transactions (
+                    user_discord_id, amount_cents, balance_after_cents,
+                    transaction_type, description, order_id, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_discord_id,
+                    -price_paid_cents,
+                    new_balance,
+                    "purchase",
+                    f"Purchase of product #{product_id}",
+                    order_id,
+                    order_metadata,
+                ),
+            )
+
+            await self._connection.commit()
+
             return order_id, new_balance
+
+    async def get_orders_for_user(
+        self,
+        user_discord_id: int,
+        *,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> list[aiosqlite.Row]:
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        cursor = await self._connection.execute(
+            """
+            SELECT * FROM orders
+            WHERE user_discord_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (user_discord_id, limit, offset),
+        )
+        return await cursor.fetchall()
+
+    async def count_orders_for_user(self, user_discord_id: int) -> int:
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        cursor = await self._connection.execute(
+            """
+            SELECT COUNT(*) as count FROM orders
+            WHERE user_discord_id = ?
+            """,
+            (user_discord_id,),
+        )
+        row = await cursor.fetchone()
+        return row["count"] if row else 0
+
+    async def get_order_by_id(self, order_id: int) -> Optional[aiosqlite.Row]:
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        cursor = await self._connection.execute(
+            "SELECT * FROM orders WHERE id = ?",
+            (order_id,),
+        )
+        return await cursor.fetchone()
+
+    async def get_ticket_by_order_id(self, order_id: int) -> Optional[aiosqlite.Row]:
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        cursor = await self._connection.execute(
+            "SELECT * FROM tickets WHERE order_id = ?",
+            (order_id,),
+        )
+        return await cursor.fetchone()
