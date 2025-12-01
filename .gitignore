@@ -131,6 +131,7 @@ dmypy.json
 
 # Project-specific
 config.json
+config/payments.json
 *.db
 *.db-journal
 apex_core.db*

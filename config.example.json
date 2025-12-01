@@ -17,36 +17,7 @@
     "start_hour_utc": 10,
     "end_hour_utc": 22
   },
-  "payment_methods": [
-    {
-      "name": "Binance Pay",
-      "instructions": "Send the desired USD amount via Binance Pay and include your Discord username in the note field.",
-      "emoji": "🟡",
-      "metadata": {
-        "pay_id": "1234567890",
-        "reference": "Use your Discord username",
-        "url": "https://pay.binance.com/en"
-      }
-    },
-    {
-      "name": "Tip.cc",
-      "instructions": "Use Tip.cc to send a tip to @ApexCore. Include the ticket channel link in your tip message.",
-      "emoji": "🤖",
-      "metadata": {
-        "command": "/tip 25 @ApexCore",
-        "url": "https://tip.cc"
-      }
-    },
-    {
-      "name": "Crypto Address",
-      "instructions": "Send USDT (TRC20) to the wallet below and reply in this ticket with the transaction hash.",
-      "emoji": "🪙",
-      "metadata": {
-        "network": "TRON (TRC20)",
-        "address": "TD1ExampleWalletAddress000000000000"
-      }
-    }
-  ],
+  "payment_methods": [],
   "roles": [
     {
       "name": "Client",
