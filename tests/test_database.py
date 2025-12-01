@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import aiosqlite
 
 
 @pytest.mark.asyncio
@@ -155,3 +156,227 @@ async def test_create_manual_order_updates_lifetime_not_wallet(db):
     assert metadata["manual_order"] is True
     assert metadata["product_name"] == "Support Package"
     assert metadata["notes"] == "Manual entry"
+
+
+@pytest.mark.asyncio
+async def test_migration_v4_extends_tickets_table(db):
+    """Test that migration v4 adds new columns to tickets table."""
+    cursor = await db._connection.execute("PRAGMA table_info(tickets)")
+    columns = {row[1]: row for row in await cursor.fetchall()}
+
+    assert "type" in columns
+    assert "order_id" in columns
+    assert "assigned_staff_id" in columns
+    assert "closed_at" in columns
+    assert "priority" in columns
+
+
+@pytest.mark.asyncio
+async def test_create_ticket_with_defaults(db):
+    """Test creating a ticket with default values for new fields."""
+    await db.ensure_user(11111)
+    
+    ticket_id = await db.create_ticket(
+        user_discord_id=11111,
+        channel_id=22222,
+    )
+
+    assert ticket_id > 0
+
+    ticket = await db.get_ticket_by_channel(22222)
+    assert ticket is not None
+    assert ticket["user_discord_id"] == 11111
+    assert ticket["channel_id"] == 22222
+    assert ticket["status"] == "open"
+    assert ticket["type"] == "support"
+    assert ticket["order_id"] is None
+    assert ticket["assigned_staff_id"] is None
+    assert ticket["priority"] is None
+    assert ticket["closed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_ticket_with_all_fields(db):
+    """Test creating a ticket with all fields specified."""
+    await db.ensure_user(33333)
+    
+    ticket_id = await db.create_ticket(
+        user_discord_id=33333,
+        channel_id=44444,
+        status="open",
+        ticket_type="billing",
+        order_id=999,
+        assigned_staff_id=555,
+        priority="high",
+    )
+
+    assert ticket_id > 0
+
+    ticket = await db.get_ticket_by_channel(44444)
+    assert ticket is not None
+    assert ticket["user_discord_id"] == 33333
+    assert ticket["status"] == "open"
+    assert ticket["type"] == "billing"
+    assert ticket["order_id"] == 999
+    assert ticket["assigned_staff_id"] == 555
+    assert ticket["priority"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_update_ticket_type(db):
+    """Test updating ticket type field."""
+    await db.ensure_user(55555)
+    
+    ticket_id = await db.create_ticket(
+        user_discord_id=55555,
+        channel_id=66666,
+    )
+
+    await db.update_ticket(66666, ticket_type="sales")
+
+    ticket = await db.get_ticket_by_channel(66666)
+    assert ticket is not None
+    assert ticket["type"] == "sales"
+    assert ticket["status"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_update_ticket_assigned_staff(db):
+    """Test updating ticket assigned_staff_id field."""
+    await db.ensure_user(77777)
+    
+    ticket_id = await db.create_ticket(
+        user_discord_id=77777,
+        channel_id=88888,
+    )
+
+    await db.update_ticket(88888, assigned_staff_id=777)
+
+    ticket = await db.get_ticket_by_channel(88888)
+    assert ticket is not None
+    assert ticket["assigned_staff_id"] == 777
+
+
+@pytest.mark.asyncio
+async def test_update_ticket_priority(db):
+    """Test updating ticket priority field."""
+    await db.ensure_user(99999)
+    
+    ticket_id = await db.create_ticket(
+        user_discord_id=99999,
+        channel_id=100000,
+    )
+
+    await db.update_ticket(100000, priority="critical")
+
+    ticket = await db.get_ticket_by_channel(100000)
+    assert ticket is not None
+    assert ticket["priority"] == "critical"
+
+
+@pytest.mark.asyncio
+async def test_update_ticket_order_id(db):
+    """Test updating ticket order_id field."""
+    await db.ensure_user(111111)
+    
+    ticket_id = await db.create_ticket(
+        user_discord_id=111111,
+        channel_id=122222,
+    )
+
+    await db.update_ticket(122222, order_id=1234)
+
+    ticket = await db.get_ticket_by_channel(122222)
+    assert ticket is not None
+    assert ticket["order_id"] == 1234
+
+
+@pytest.mark.asyncio
+async def test_update_ticket_closed_at(db):
+    """Test updating ticket closed_at timestamp field."""
+    await db.ensure_user(133333)
+    
+    ticket_id = await db.create_ticket(
+        user_discord_id=133333,
+        channel_id=144444,
+    )
+
+    closed_timestamp = "2024-12-01 10:30:45"
+    await db.update_ticket(144444, closed_at=closed_timestamp)
+
+    ticket = await db.get_ticket_by_channel(144444)
+    assert ticket is not None
+    assert ticket["closed_at"] == closed_timestamp
+
+
+@pytest.mark.asyncio
+async def test_update_ticket_multiple_fields(db):
+    """Test updating multiple ticket fields at once."""
+    await db.ensure_user(155555)
+    
+    ticket_id = await db.create_ticket(
+        user_discord_id=155555,
+        channel_id=166666,
+    )
+
+    await db.update_ticket(
+        166666,
+        ticket_type="support",
+        assigned_staff_id=888,
+        priority="medium",
+        order_id=5678,
+        closed_at="2024-12-01 15:45:30",
+    )
+
+    ticket = await db.get_ticket_by_channel(166666)
+    assert ticket is not None
+    assert ticket["type"] == "support"
+    assert ticket["assigned_staff_id"] == 888
+    assert ticket["priority"] == "medium"
+    assert ticket["order_id"] == 5678
+    assert ticket["closed_at"] == "2024-12-01 15:45:30"
+
+
+@pytest.mark.asyncio
+async def test_update_ticket_status_preserves_other_fields(db):
+    """Test that updating status doesn't affect new fields."""
+    await db.ensure_user(177777)
+    
+    await db.create_ticket(
+        user_discord_id=177777,
+        channel_id=188888,
+        ticket_type="billing",
+        assigned_staff_id=999,
+        priority="high",
+    )
+
+    await db.update_ticket_status(188888, "resolved")
+
+    ticket = await db.get_ticket_by_channel(188888)
+    assert ticket is not None
+    assert ticket["status"] == "resolved"
+    assert ticket["type"] == "billing"
+    assert ticket["assigned_staff_id"] == 999
+    assert ticket["priority"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_ticket_fields_persist_across_operations(db):
+    """Test that ticket fields persist through multiple operations."""
+    await db.ensure_user(199999)
+    
+    ticket_id = await db.create_ticket(
+        user_discord_id=199999,
+        channel_id=200000,
+        ticket_type="sales",
+        order_id=9999,
+        priority="low",
+    )
+
+    await db.touch_ticket_activity(200000)
+
+    ticket = await db.get_ticket_by_channel(200000)
+    assert ticket is not None
+    assert ticket["type"] == "sales"
+    assert ticket["order_id"] == 9999
+    assert ticket["priority"] == "low"

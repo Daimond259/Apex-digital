@@ -19,7 +19,7 @@ class Database:
         self.db_path = Path(db_path)
         self._connection: Optional[aiosqlite.Connection] = None
         self._wallet_lock = asyncio.Lock()
-        self.target_schema_version = 3
+        self.target_schema_version = 4
 
     async def connect(self) -> None:
         if self._connection is None:
@@ -83,6 +83,7 @@ class Database:
             1: ("base_schema", self._migration_v1),
             2: ("migrate_products_table", self._migration_v2),
             3: ("migrate_discounts_indexes", self._migration_v3),
+            4: ("extend_tickets_schema", self._migration_v4),
         }
 
         for version in sorted(migrations.keys()):
@@ -273,6 +274,41 @@ class Database:
                 ON orders(user_discord_id)
             """
         )
+        await self._connection.commit()
+
+    async def _migration_v4(self) -> None:
+        """Migration v4: Extend tickets table with type, order_id, assigned_staff_id, closed_at, and priority columns."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        cursor = await self._connection.execute("PRAGMA table_info(tickets)")
+        columns = [row[1] for row in await cursor.fetchall()]
+
+        if "type" not in columns:
+            await self._connection.execute(
+                "ALTER TABLE tickets ADD COLUMN type TEXT NOT NULL DEFAULT 'support'"
+            )
+
+        if "order_id" not in columns:
+            await self._connection.execute(
+                "ALTER TABLE tickets ADD COLUMN order_id INTEGER"
+            )
+
+        if "assigned_staff_id" not in columns:
+            await self._connection.execute(
+                "ALTER TABLE tickets ADD COLUMN assigned_staff_id INTEGER"
+            )
+
+        if "closed_at" not in columns:
+            await self._connection.execute(
+                "ALTER TABLE tickets ADD COLUMN closed_at TIMESTAMP"
+            )
+
+        if "priority" not in columns:
+            await self._connection.execute(
+                "ALTER TABLE tickets ADD COLUMN priority TEXT"
+            )
+
         await self._connection.commit()
 
     async def ensure_user(self, discord_id: int) -> aiosqlite.Row:
@@ -744,16 +780,30 @@ class Database:
         user_discord_id: int,
         channel_id: int,
         status: str = "open",
+        ticket_type: str = "support",
+        order_id: Optional[int] = None,
+        assigned_staff_id: Optional[int] = None,
+        priority: Optional[str] = None,
     ) -> int:
         if self._connection is None:
             raise RuntimeError("Database connection not initialized.")
 
         cursor = await self._connection.execute(
             """
-            INSERT INTO tickets (user_discord_id, channel_id, status)
-            VALUES (?, ?, ?)
+            INSERT INTO tickets (
+                user_discord_id, channel_id, status, type, order_id, 
+                assigned_staff_id, priority
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_discord_id, channel_id, status),
+            (
+                user_discord_id,
+                channel_id,
+                status,
+                ticket_type,
+                order_id,
+                assigned_staff_id,
+                priority,
+            ),
         )
         await self._connection.commit()
         return cursor.lastrowid
@@ -838,6 +888,60 @@ class Database:
             """
         )
         return await cursor.fetchall()
+
+    async def update_ticket(
+        self,
+        channel_id: int,
+        *,
+        status: Optional[str] = None,
+        ticket_type: Optional[str] = None,
+        order_id: Optional[int] = None,
+        assigned_staff_id: Optional[int] = None,
+        priority: Optional[str] = None,
+        closed_at: Optional[str] = None,
+    ) -> None:
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        update_fields = []
+        params = []
+
+        if status is not None:
+            update_fields.append("status = ?")
+            params.append(status)
+
+        if ticket_type is not None:
+            update_fields.append("type = ?")
+            params.append(ticket_type)
+
+        if order_id is not None:
+            update_fields.append("order_id = ?")
+            params.append(order_id)
+
+        if assigned_staff_id is not None:
+            update_fields.append("assigned_staff_id = ?")
+            params.append(assigned_staff_id)
+
+        if priority is not None:
+            update_fields.append("priority = ?")
+            params.append(priority)
+
+        if closed_at is not None:
+            update_fields.append("closed_at = ?")
+            params.append(closed_at)
+
+        if not update_fields:
+            return
+
+        params.append(channel_id)
+        query = f"""
+            UPDATE tickets
+            SET {', '.join(update_fields)}
+            WHERE channel_id = ?
+        """
+
+        await self._connection.execute(query, params)
+        await self._connection.commit()
 
     async def create_order(
         self,
