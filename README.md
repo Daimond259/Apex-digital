@@ -285,42 +285,55 @@ async def _migration_v4(self) -> None:
 
 ## Product Management
 
-### Using the Products Template
+### Products CSV Template and Import Guide
 
-A professional Excel template (`products_template.xlsx`) is provided for easy bulk product management:
+For comprehensive documentation on using the products CSV template, see:
+**[`docs/products_template.md`](docs/products_template.md)** - Complete guide with column mapping, validation rules, and step-by-step instructions
 
-1. **Open the template**: The file contains three sheets:
-   - **Products**: Main data entry sheet with example rows
-   - **Instructions**: Step-by-step guide for using the template
-   - **Column Guide**: Detailed explanations of each field
+#### Quick Start
 
-2. **Add your products**: Follow the example format:
-   - Delete example rows (keep headers)
-   - Fill in your product data
-   - Categories: Instagram, YouTube, TikTok, Xbox, ChatGPT, etc.
-   - Sub-categories: Followers, Likes, Views, Subscriptions, etc.
-   - Price in USD (e.g., 10.99 for $10.99)
+A professional Excel template (`templates/products_template.xlsx`) is provided for easy bulk product management:
 
-3. **Export to CSV**:
-   - File → Save As → CSV (Comma delimited)
-   - Only the Products sheet will be exported
+1. **Get the template**: Download `templates/products_template.xlsx` or regenerate with `python3 create_template.py`
 
-4. **Import to Discord**:
-   - Use the `/import_products` command (admin-only)
-   - Attach your CSV file
-   - Products will be automatically added to the database
+2. **Add your products**: The template includes 3 sheets:
+   - **Products**: Main data entry sheet with 16 example rows
+   - **Instructions**: Step-by-step usage guide  
+   - **Column Guide**: Detailed field explanations
 
-### Template Fields
+3. **Export to CSV**: File → Save As → CSV (Comma delimited)
 
-- **Main_Category**: Platform (Instagram, YouTube, TikTok, etc.)
-- **Sub_Category**: Service type (Followers, Likes, Subscribers, etc.)
-- **Service_Name**: Grouping name (e.g., "Instagram Services")
-- **Variant_Name**: Display name (e.g., "1000 Followers")
-- **Price_USD**: Price in dollars (converted to cents internally)
-- **Start_Time**: Delivery start time (e.g., "10-25min", "1-3hr")
-- **Duration**: Delivery duration (e.g., "100min", "72hr", "N/A")
-- **Refill_Period**: Guarantee period (e.g., "30 day", "No refill")
-- **Additional_Info**: Extra notes or requirements
+4. **Import to Discord**: Use `/import_products` command (admin-only) and attach your CSV
+
+#### Template Fields Overview
+
+| CSV Column | Database Field | Required? | Description |
+|------------|----------------|-----------|-------------|
+| **Main_Category** | `main_category` | ✅ Yes | Platform (Instagram, YouTube, TikTok, etc.) |
+| **Sub_Category** | `sub_category` | ✅ Yes | Service type (Followers, Likes, Subscribers, etc.) |
+| **Service_Name** | `service_name` | ✅ Yes | Internal grouping name (e.g., "Instagram Services") |
+| **Variant_Name** | `variant_name` | ✅ Yes | Customer-facing display name (e.g., "1000 Followers") |
+| **Price_USD** | `price_cents` | ✅ Yes | Price in dollars (converted to cents internally) |
+| **Start_Time** | `start_time` | ❌ No | Delivery start time (e.g., "10-25min", "1-3hr") |
+| **Duration** | `duration` | ❌ No | Delivery duration (e.g., "100min", "72hr", "N/A") |
+| **Refill_Period** | `refill_period` | ❌ No | Guarantee period (e.g., "30 day", "No refill") |
+| **Additional_Info** | `additional_info` | ❌ No | Extra notes or requirements |
+
+#### Schema Notes
+
+- **Role assignments** (`role_id`) and **content delivery** (`content_payload`) are managed post-import via database/admin commands
+- **Price conversion**: USD values are automatically converted to cents (10.99 → 1099)
+- **Storefront grouping**: Products are organized by Main_Category → Sub_Category → Variant_Name
+- **Validation**: The importer enforces required fields and positive pricing
+
+#### Regenerating Template
+
+To update the template structure or example data:
+```bash
+python3 create_template.py
+```
+
+This creates a fresh `products_template.xlsx` with current schema alignment.
 
 ## Development
 
