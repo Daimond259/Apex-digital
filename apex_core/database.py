@@ -19,7 +19,7 @@ class Database:
         self.db_path = Path(db_path)
         self._connection: Optional[aiosqlite.Connection] = None
         self._wallet_lock = asyncio.Lock()
-        self.target_schema_version = 5
+        self.target_schema_version = 6
 
     async def connect(self) -> None:
         if self._connection is None:
@@ -85,6 +85,7 @@ class Database:
             3: ("migrate_discounts_indexes", self._migration_v3),
             4: ("extend_tickets_schema", self._migration_v4),
             5: ("wallet_transactions_table", self._migration_v5),
+            6: ("extend_orders_schema", self._migration_v6),
         }
 
         for version in sorted(migrations.keys()):
@@ -349,6 +350,51 @@ class Database:
             """
             CREATE INDEX IF NOT EXISTS idx_wallet_transactions_type
                 ON wallet_transactions(transaction_type)
+            """
+        )
+
+        await self._connection.commit()
+
+    async def _migration_v6(self) -> None:
+        """Migration v6: Extend orders table with status and warranty fields."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        cursor = await self._connection.execute("PRAGMA table_info(orders)")
+        columns = [row[1] for row in await cursor.fetchall()]
+
+        if "status" not in columns:
+            await self._connection.execute(
+                "ALTER TABLE orders ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'"
+            )
+
+        if "warranty_expires_at" not in columns:
+            await self._connection.execute(
+                "ALTER TABLE orders ADD COLUMN warranty_expires_at TIMESTAMP"
+            )
+
+        if "last_renewed_at" not in columns:
+            await self._connection.execute(
+                "ALTER TABLE orders ADD COLUMN last_renewed_at TIMESTAMP"
+            )
+
+        if "renewal_count" not in columns:
+            await self._connection.execute(
+                "ALTER TABLE orders ADD COLUMN renewal_count INTEGER NOT NULL DEFAULT 0"
+            )
+
+        # Create indexes for the new fields
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_orders_status
+                ON orders(status)
+            """
+        )
+
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_orders_warranty_expiry
+                ON orders(warranty_expires_at)
             """
         )
 
@@ -1068,6 +1114,8 @@ class Database:
         price_paid_cents: int,
         discount_applied_percent: float,
         order_metadata: Optional[str] = None,
+        status: str = "pending",
+        warranty_expires_at: Optional[str] = None,
     ) -> int:
         if self._connection is None:
             raise RuntimeError("Database connection not initialized.")
@@ -1076,8 +1124,9 @@ class Database:
             """
             INSERT INTO orders (
                 user_discord_id, product_id, price_paid_cents, 
-                discount_applied_percent, order_metadata
-            ) VALUES (?, ?, ?, ?, ?)
+                discount_applied_percent, order_metadata, status,
+                warranty_expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_discord_id,
@@ -1085,6 +1134,8 @@ class Database:
                 price_paid_cents,
                 discount_applied_percent,
                 order_metadata,
+                status,
+                warranty_expires_at,
             ),
         )
         await self._connection.commit()
@@ -1142,8 +1193,8 @@ class Database:
                 """
                 INSERT INTO orders (
                     user_discord_id, product_id, price_paid_cents,
-                    discount_applied_percent, order_metadata
-                ) VALUES (?, ?, ?, ?, ?)
+                    discount_applied_percent, order_metadata, status
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_discord_id,
@@ -1151,6 +1202,7 @@ class Database:
                     price_paid_cents,
                     0.0,  # No discount for manual orders
                     order_metadata,
+                    "pending",  # Default status for manual orders
                 ),
             )
             order_id = cursor.lastrowid
@@ -1305,8 +1357,8 @@ class Database:
                 """
                 INSERT INTO orders (
                     user_discord_id, product_id, price_paid_cents,
-                    discount_applied_percent, order_metadata
-                ) VALUES (?, ?, ?, ?, ?)
+                    discount_applied_percent, order_metadata, status
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_discord_id,
@@ -1314,6 +1366,7 @@ class Database:
                     price_paid_cents,
                     discount_applied_percent,
                     order_metadata,
+                    "pending",  # Default status for new orders
                 ),
             )
             order_id = cursor.lastrowid
@@ -1401,3 +1454,110 @@ class Database:
             (order_id,),
         )
         return await cursor.fetchone()
+
+    async def update_order_status(self, order_id: int, status: str) -> None:
+        """Update the status of an order."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        valid_statuses = ["pending", "fulfilled", "refill", "refunded"]
+        if status not in valid_statuses:
+            raise ValueError(f"Invalid status. Must be one of: {', '.join(valid_statuses)}")
+
+        await self._connection.execute(
+            "UPDATE orders SET status = ? WHERE id = ?",
+            (status, order_id),
+        )
+        await self._connection.commit()
+
+    async def renew_order_warranty(
+        self, 
+        order_id: int, 
+        warranty_expires_at: str,
+        staff_discord_id: Optional[int] = None
+    ) -> None:
+        """Renew an order's warranty and update renewal tracking."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        await self._connection.execute("BEGIN IMMEDIATE;")
+        
+        try:
+            # Update warranty and renewal info
+            await self._connection.execute(
+                """
+                UPDATE orders 
+                SET warranty_expires_at = ?,
+                    last_renewed_at = CURRENT_TIMESTAMP,
+                    renewal_count = renewal_count + 1
+                WHERE id = ?
+                """,
+                (warranty_expires_at, order_id),
+            )
+
+            # Log the renewal in wallet transactions
+            cursor = await self._connection.execute(
+                "SELECT user_discord_id FROM orders WHERE id = ?",
+                (order_id,),
+            )
+            order_row = await cursor.fetchone()
+            if order_row:
+                await self.log_wallet_transaction(
+                    user_discord_id=order_row["user_discord_id"],
+                    amount_cents=0,
+                    balance_after_cents=0,  # Not applicable for warranty renewal
+                    transaction_type="warranty_renewal",
+                    description=f"Warranty renewal for order #{order_id}",
+                    order_id=order_id,
+                    staff_discord_id=staff_discord_id,
+                    metadata=f'{{"renewal_date": "{warranty_expires_at}"}}',
+                )
+
+            await self._connection.commit()
+        except Exception:
+            await self._connection.rollback()
+            raise
+
+    async def get_orders_expiring_soon(self, days_ahead: int = 7) -> list[aiosqlite.Row]:
+        """Get orders with warranties expiring within the specified number of days."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        cursor = await self._connection.execute(
+            """
+            SELECT o.*, u.discord_id as user_discord_id
+            FROM orders o
+            JOIN users u ON o.user_discord_id = u.discord_id
+            WHERE o.warranty_expires_at IS NOT NULL
+              AND o.warranty_expires_at <= datetime('now', '+' || ? || ' days')
+              AND o.warranty_expires_at > datetime('now')
+              AND o.status IN ('fulfilled', 'refill')
+            ORDER BY o.warranty_expires_at ASC
+            """,
+            (days_ahead,),
+        )
+        return await cursor.fetchall()
+
+    async def get_active_orders(self, user_discord_id: Optional[int] = None) -> list[aiosqlite.Row]:
+        """Get orders that are currently active (not refunded)."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        if user_discord_id:
+            cursor = await self._connection.execute(
+                """
+                SELECT * FROM orders
+                WHERE user_discord_id = ? AND status != 'refunded'
+                ORDER BY created_at DESC
+                """,
+                (user_discord_id,),
+            )
+        else:
+            cursor = await self._connection.execute(
+                """
+                SELECT * FROM orders
+                WHERE status != 'refunded'
+                ORDER BY created_at DESC
+                """
+            )
+        return await cursor.fetchall()

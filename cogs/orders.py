@@ -81,6 +81,25 @@ class OrdersCog(commands.Cog):
         
         embed.add_field(name="Order Date", value=order["created_at"], inline=False)
         
+        # Status field with color coding
+        status_emoji = {
+            "pending": "⏳",
+            "fulfilled": "✅", 
+            "refill": "🔄",
+            "refunded": "❌"
+        }
+        status_display = f"{status_emoji.get(order['status'], '❓')} {order['status'].title()}"
+        embed.add_field(name="Status", value=status_display, inline=True)
+        
+        # Warranty information
+        if order.get("warranty_expires_at"):
+            warranty_info = f"Expires: {order['warranty_expires_at']}"
+            if order.get("renewal_count", 0) > 0:
+                warranty_info += f"\nRenewals: {order['renewal_count']}"
+                if order.get("last_renewed_at"):
+                    warranty_info += f"\nLast renewed: {order['last_renewed_at']}"
+            embed.add_field(name="Warranty", value=warranty_info, inline=True)
+        
         if ticket:
             ticket_info = f"Ticket #{ticket['id']} (Channel ID: {ticket['channel_id']})"
             if ticket["status"]:
@@ -183,7 +202,21 @@ class OrdersCog(commands.Cog):
             if ticket:
                 ticket_str = f" 🎫"
 
-            value = f"{product_name}\n{price_str}{discount_str}{ticket_str}\n{order['created_at']}"
+            # Status emoji
+            status_emoji = {
+                "pending": "⏳",
+                "fulfilled": "✅", 
+                "refill": "🔄",
+                "refunded": "❌"
+            }
+            status_emoji_str = status_emoji.get(order['status'], "❓")
+            
+            # Warranty info for active orders
+            warranty_str = ""
+            if order.get("warranty_expires_at") and order['status'] in ['fulfilled', 'refill']:
+                warranty_str = f" 🔒"
+
+            value = f"{product_name}\n{price_str}{discount_str} {status_emoji_str}{warranty_str}{ticket_str}\n{order['created_at']}"
             
             embed.add_field(
                 name=f"Order #{order['id']}{order_type}",
@@ -308,6 +341,236 @@ class OrdersCog(commands.Cog):
             embed.set_footer(text=f"Use /transactions page:{page+1} to see the next page")
 
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="order-status", description="Update order status (admin only)")
+    @app_commands.describe(
+        order_id="Order ID to update",
+        status="New status for the order"
+    )
+    @app_commands.choices(
+        status=[
+            app_commands.Choice(name="⏳ Pending", value="pending"),
+            app_commands.Choice(name="✅ Fulfilled", value="fulfilled"),
+            app_commands.Choice(name="🔄 Refill", value="refill"),
+            app_commands.Choice(name="❌ Refunded", value="refunded"),
+        ]
+    )
+    async def order_status(
+        self,
+        interaction: discord.Interaction,
+        order_id: int,
+        status: str,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "This command must be used in a server.", ephemeral=True
+            )
+            return
+
+        requester = self._resolve_member(interaction)
+        if requester is None or not self._is_admin(requester):
+            await interaction.response.send_message(
+                "Only admins can update order status.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            # Get the order first to verify it exists
+            order = await self.bot.db.get_order_by_id(order_id)
+            if not order:
+                await interaction.followup.send(
+                    f"Order #{order_id} not found.", ephemeral=True
+                )
+                return
+
+            old_status = order["status"]
+            await self.bot.db.update_order_status(order_id, status)
+
+            # Get user info for the response
+            user = interaction.guild.get_member(order["user_discord_id"])
+            user_mention = user.mention if user else f"<@{order['user_discord_id']}>"
+
+            embed = create_embed(
+                title=f"Order #{order_id} Status Updated",
+                description=f"Status changed from **{old_status.title()}** to **{status.title()}**",
+                color=discord.Color.green(),
+            )
+            embed.add_field(name="User", value=user_mention, inline=True)
+            embed.add_field(name="Updated by", value=requester.mention, inline=True)
+            embed.add_field(name="Order Date", value=order["created_at"], inline=False)
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except ValueError as e:
+            await interaction.followup.send(f"Error: {e}", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error updating order status: {e}")
+            await interaction.followup.send(
+                "An error occurred while updating the order status.", ephemeral=True
+            )
+
+    @app_commands.command(name="renew-warranty", description="Renew order warranty (admin only)")
+    @app_commands.describe(
+        order_id="Order ID to renew warranty for",
+        days="Warranty duration in days from now"
+    )
+    async def renew_warranty(
+        self,
+        interaction: discord.Interaction,
+        order_id: int,
+        days: int,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "This command must be used in a server.", ephemeral=True
+            )
+            return
+
+        requester = self._resolve_member(interaction)
+        if requester is None or not self._is_admin(requester):
+            await interaction.response.send_message(
+                "Only admins can renew warranties.", ephemeral=True
+            )
+            return
+
+        if days <= 0:
+            await interaction.response.send_message(
+                "Days must be a positive number.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            # Get the order first to verify it exists
+            order = await self.bot.db.get_order_by_id(order_id)
+            if not order:
+                await interaction.followup.send(
+                    f"Order #{order_id} not found.", ephemeral=True
+                )
+                return
+
+            # Calculate warranty expiry date
+            from datetime import datetime, timedelta
+            expiry_date = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+
+            old_renewal_count = order.get("renewal_count", 0)
+            await self.bot.db.renew_order_warranty(
+                order_id, expiry_date, interaction.user.id
+            )
+
+            # Get user info for the response
+            user = interaction.guild.get_member(order["user_discord_id"])
+            user_mention = user.mention if user else f"<@{order['user_discord_id']}>"
+
+            embed = create_embed(
+                title=f"Order #{order_id} Warranty Renewed",
+                description=f"Warranty extended by **{days} days**",
+                color=discord.Color.blue(),
+            )
+            embed.add_field(name="User", value=user_mention, inline=True)
+            embed.add_field(name="New expiry", value=expiry_date, inline=True)
+            embed.add_field(name="Renewal count", value=str(old_renewal_count + 1), inline=True)
+            embed.add_field(name="Renewed by", value=requester.mention, inline=False)
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            logger.error(f"Error renewing warranty: {e}")
+            await interaction.followup.send(
+                "An error occurred while renewing the warranty.", ephemeral=True
+            )
+
+    @app_commands.command(name="warranty-expiry", description="Check orders with warranties expiring soon (admin only)")
+    @app_commands.describe(
+        days="Number of days ahead to check (default: 7)"
+    )
+    async def warranty_expiry(
+        self,
+        interaction: discord.Interaction,
+        days: int = 7,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "This command must be used in a server.", ephemeral=True
+            )
+            return
+
+        requester = self._resolve_member(interaction)
+        if requester is None or not self._is_admin(requester):
+            await interaction.response.send_message(
+                "Only admins can check warranty expiry.", ephemeral=True
+            )
+            return
+
+        if days <= 0:
+            await interaction.response.send_message(
+                "Days must be a positive number.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            expiring_orders = await self.bot.db.get_orders_expiring_soon(days)
+
+            if not expiring_orders:
+                await interaction.followup.send(
+                    f"No orders with warranties expiring in the next {days} days.", ephemeral=True
+                )
+                return
+
+            embed = create_embed(
+                title=f"Orders Expiring in Next {days} Days",
+                description=f"Found {len(expiring_orders)} order(s) with expiring warranties",
+                color=discord.Color.orange(),
+            )
+
+            for order in expiring_orders:
+                user = interaction.guild.get_member(order["user_discord_id"])
+                user_mention = user.mention if user else f"<@{order['user_discord_id']}>"
+
+                # Get product info
+                product = None
+                if order["product_id"] != 0:
+                    product = await self.bot.db.get_product(order["product_id"])
+
+                if order["product_id"] == 0:
+                    try:
+                        metadata = json.loads(order["order_metadata"]) if order["order_metadata"] else {}
+                        product_name = metadata.get("product_name", "Manual Order")
+                    except (json.JSONDecodeError, TypeError):
+                        product_name = "Manual Order"
+                elif product:
+                    product_name = f"{product['service_name']} - {product['variant_name']}"
+                else:
+                    product_name = f"Product #{order['product_id']} (deleted)"
+
+                renewals = order.get("renewal_count", 0)
+                renewal_info = f" ({renewals} renewals)" if renewals > 0 else ""
+
+                value = (
+                    f"**User:** {user_mention}\n"
+                    f"**Product:** {product_name}\n"
+                    f"**Status:** {order['status'].title()}\n"
+                    f"**Expires:** {order['warranty_expires_at']}{renewal_info}"
+                )
+
+                embed.add_field(
+                    name=f"Order #{order['id']}",
+                    value=value,
+                    inline=False,
+                )
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            logger.error(f"Error checking warranty expiry: {e}")
+            await interaction.followup.send(
+                "An error occurred while checking warranty expiry.", ephemeral=True
+            )
 
 
 async def setup(bot: commands.Bot) -> None:
