@@ -14,7 +14,7 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 
-from apex_core import load_config, Database, TranscriptStorage
+from apex_core import load_config, load_payment_settings, Database, TranscriptStorage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -91,6 +91,19 @@ async def main():
     if token:
         config = replace(config, token=token)
         logger.info("Using token from environment variable")
+    
+    # Validate payments configuration if it exists
+    try:
+        payment_settings = load_payment_settings()
+        logger.info("Payments configuration loaded successfully")
+        if not config.payment_settings:
+            # This shouldn't happen if load_payment_settings succeeded
+            logger.warning("Payments config loaded but not attached to main config")
+    except FileNotFoundError:
+        logger.info("Payments configuration file not found - using legacy inline payment methods")
+    except Exception as e:
+        logger.error("Payments configuration validation failed: %s", e)
+        sys.exit(1)
 
     intents = discord.Intents.default()
     intents.message_content = True

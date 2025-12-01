@@ -34,11 +34,13 @@ A feature-rich Discord bot for automated product distribution, ticketing, and VI
    ```
 
 3. Configure the bot:
-   ```bash
-   cp config.example.json config.json
-   ```
-   
-   Edit `config.json` with your bot token, guild IDs, role IDs, and other settings.
+    ```bash
+    cp config.example.json config.json
+    cp config/payments.example.json config/payments.json
+    ```
+
+    Edit `config.json` with your bot token, guild IDs, role IDs, and other settings.
+    Edit `config/payments.json` with your payment methods and confirmation templates.
 
 4. Run the bot:
    ```bash
@@ -57,7 +59,9 @@ pytest
 
 ## Configuration
 
-The `config.json` file contains all bot settings:
+### Main Configuration (`config.json`)
+
+The `config.json` file contains core bot settings:
 
 - **token**: Your Discord bot token
 - **bot_prefix**: Command prefix (default: `!`)
@@ -65,17 +69,74 @@ The `config.json` file contains all bot settings:
 - **role_ids**: Role IDs for admin and VIP tiers
 - **ticket_categories**: Category IDs for support, billing, and sales tickets
 - **operating_hours**: Start and end hours in UTC (24-hour format)
-- **payment_methods**: List of accepted payment methods with instructions and metadata
+- **payment_methods**: Legacy payment methods (kept for backward compatibility)
 - **vip_thresholds**: Spending thresholds for VIP tiers (in cents) and discount percentages
 - **logging_channels**: Channel IDs for logging audit, payments, tickets, errors, and optional transcript archives
+
+### Payments Configuration (`config/payments.json`)
+
+The `config/payments.json` file contains payment-related settings:
+
+- **payment_methods**: List of accepted payment methods with instructions, emoji, and metadata
+- **order_confirmation_template**: Template for order confirmation messages with placeholders
+- **refund_policy**: Default refund policy string
+
+#### Payment Method Structure
+
+Each payment method supports:
+- **name**: Display name for the payment method
+- **instructions**: User-facing instructions for how to pay
+- **emoji**: Optional emoji icon for the payment method
+- **metadata**: Additional data like URLs, addresses, or special flags
+
+#### Available Payment Methods
+
+The system supports various payment types:
+- **Wallet**: Internal wallet balance for instant payments
+- **Binance**: Binance Pay integration with Pay ID
+- **Atto**: Atto payments with automatic cashback
+- **PayPal**: PayPal email for manual payments
+- **Tip.cc**: Discord tipbot integration
+- **CryptoJar**: Alternative Discord tipbot
+- **Bitcoin/Ethereum/Solana**: Cryptocurrency addresses with network metadata
+
+#### Template Placeholders
+
+The `order_confirmation_template` supports these placeholders:
+- `{order_id}`: Unique order identifier
+- `{service_name}`: Name of the purchased service
+- `{variant_name}`: Specific variant or tier
+- `{price}`: Formatted price with currency
+- `{eta}`: Estimated delivery time
+
+#### Adding/Removing Payment Methods
+
+To add a new payment method:
+
+```json
+{
+  "name": "New Payment Method",
+  "instructions": "How to use this payment method",
+  "emoji": "🆕",
+  "metadata": {
+    "url": "https://example.com",
+    "additional_info": "Extra details"
+  }
+}
+```
+
+To remove a payment method, simply delete its object from the `payment_methods` array. The system will automatically update the available options.
 
 ## Project Structure
 
 ```
 apex-core/
 ├── bot.py                    # Main bot entrypoint
-├── config.example.json       # Example configuration
-├── config.json              # Your configuration (gitignored)
+├── config.example.json       # Example main configuration
+├── config.json              # Your main configuration (gitignored)
+├── config/                  # Configuration directory
+│   ├── payments.example.json # Example payments configuration
+│   └── payments.json        # Your payments configuration (gitignored)
 ├── requirements.txt         # Python dependencies
 ├── apex_core/              # Core modules
 │   ├── __init__.py
@@ -87,8 +148,16 @@ apex-core/
 │       ├── embeds.py       # Embed factory
 │       ├── timestamps.py   # Discord timestamp helpers
 │       └── vip.py          # VIP tier calculations
-└── cogs/                   # Bot cogs (to be implemented)
-    └── __init__.py
+├── cogs/                   # Bot cogs
+│   ├── wallet.py           # Wallet and deposit commands
+│   ├── orders.py           # Order management commands
+│   ├── storefront.py       # Product browsing and purchasing
+│   ├── notifications.py    # Background notifications
+│   └── ticket_management.py # Ticket lifecycle management
+└── tests/                  # Test suite
+    ├── test_payments_config.py # Payments configuration tests
+    ├── test_database.py    # Database layer tests
+    └── test_wallet_transactions.py # Wallet transaction tests
 ```
 
 ## Database Schema and Migrations

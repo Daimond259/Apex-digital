@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from apex_core.config import PaymentMethod
+from apex_core.config import PaymentMethod, PaymentSettings
 from apex_core.utils import create_embed, format_usd, render_operating_hours
 
 logger = logging.getLogger(__name__)
@@ -73,6 +73,11 @@ class WalletCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
+    @property
+    def payment_settings(self) -> PaymentSettings | None:
+        """Get the payment settings, falling back to None if not configured."""
+        return self.bot.config.payment_settings
+
     # region Helpers
     def _operating_hours_text(self) -> str:
         return render_operating_hours(self.bot.config.operating_hours)
@@ -91,7 +96,12 @@ class WalletCog(commands.Cog):
         return None
 
     def _get_payment_methods(self, required: Sequence[str]) -> list[PaymentMethod]:
-        lookup = {method.name.lower(): method for method in self.bot.config.payment_methods}
+        # Use payment settings if available, otherwise fall back to legacy payment methods
+        if self.bot.config.payment_settings:
+            lookup = {method.name.lower(): method for method in self.bot.config.payment_settings.payment_methods}
+        else:
+            lookup = {method.name.lower(): method for method in self.bot.config.payment_methods}
+        
         missing = [name for name in required if name.lower() not in lookup]
         if missing:
             raise RuntimeError(
