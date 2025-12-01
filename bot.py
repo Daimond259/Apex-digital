@@ -14,7 +14,7 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 
-from apex_core import load_config, Database
+from apex_core import load_config, Database, TranscriptStorage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,11 +33,15 @@ class ApexCoreBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         self.config = kwargs.pop("config")
         self.db = Database()
+        self.storage = TranscriptStorage()
         super().__init__(*args, **kwargs)
 
     async def setup_hook(self):
         await self.db.connect()
         logger.info("Database connected and schema initialized.")
+        
+        self.storage.initialize()
+        logger.info("Transcript storage initialized.")
 
         await self._load_cogs()
 

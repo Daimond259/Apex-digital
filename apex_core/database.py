@@ -19,7 +19,7 @@ class Database:
         self.db_path = Path(db_path)
         self._connection: Optional[aiosqlite.Connection] = None
         self._wallet_lock = asyncio.Lock()
-        self.target_schema_version = 6
+        self.target_schema_version = 7
 
     async def connect(self) -> None:
         if self._connection is None:
@@ -86,6 +86,7 @@ class Database:
             4: ("extend_tickets_schema", self._migration_v4),
             5: ("wallet_transactions_table", self._migration_v5),
             6: ("extend_orders_schema", self._migration_v6),
+            7: ("transcripts_table", self._migration_v7),
         }
 
         for version in sorted(migrations.keys()):
@@ -395,6 +396,43 @@ class Database:
             """
             CREATE INDEX IF NOT EXISTS idx_orders_warranty_expiry
                 ON orders(warranty_expires_at)
+            """
+        )
+
+        await self._connection.commit()
+
+    async def _migration_v7(self) -> None:
+        """Migration v7: Create transcripts table for transcript persistence."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transcripts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                user_discord_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                storage_type TEXT NOT NULL,
+                storage_path TEXT NOT NULL,
+                file_size_bytes INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_transcripts_ticket
+                ON transcripts(ticket_id)
+            """
+        )
+
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_transcripts_user
+                ON transcripts(user_discord_id)
             """
         )
 
@@ -1560,4 +1598,52 @@ class Database:
                 ORDER BY created_at DESC
                 """
             )
+        return await cursor.fetchall()
+
+    async def save_transcript(
+        self,
+        *,
+        ticket_id: int,
+        user_discord_id: int,
+        channel_id: int,
+        storage_type: str,
+        storage_path: str,
+        file_size_bytes: Optional[int] = None,
+    ) -> int:
+        """Save transcript metadata to the database."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        cursor = await self._connection.execute(
+            """
+            INSERT INTO transcripts (
+                ticket_id, user_discord_id, channel_id,
+                storage_type, storage_path, file_size_bytes
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (ticket_id, user_discord_id, channel_id, storage_type, storage_path, file_size_bytes),
+        )
+        await self._connection.commit()
+        return cursor.lastrowid
+
+    async def get_transcript_by_ticket_id(self, ticket_id: int) -> Optional[aiosqlite.Row]:
+        """Get transcript metadata for a specific ticket."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        cursor = await self._connection.execute(
+            "SELECT * FROM transcripts WHERE ticket_id = ? ORDER BY created_at DESC LIMIT 1",
+            (ticket_id,),
+        )
+        return await cursor.fetchone()
+
+    async def get_transcripts_by_user(self, user_discord_id: int) -> list[aiosqlite.Row]:
+        """Get all transcript metadata for a specific user."""
+        if self._connection is None:
+            raise RuntimeError("Database connection not initialized.")
+
+        cursor = await self._connection.execute(
+            "SELECT * FROM transcripts WHERE user_discord_id = ? ORDER BY created_at DESC",
+            (user_discord_id,),
+        )
         return await cursor.fetchall()

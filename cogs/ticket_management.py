@@ -156,7 +156,8 @@ class TicketManagementCog(commands.Cog):
             except Exception as e:
                 logger.error("Failed to generate transcript for ticket %s: %s", ticket["id"], e)
         else:
-            logger.warning("chat_exporter not available, skipping transcript generation")
+            logger.warning("chat_exporter not available, generating fallback transcript")
+            transcript_html = await self._generate_fallback_transcript(channel, ticket)
         
         log_channel_id = self.bot.config.logging_channels.tickets
         log_channel = channel.guild.get_channel(log_channel_id)
@@ -214,7 +215,86 @@ class TicketManagementCog(commands.Cog):
                 except discord.HTTPException as e:
                     logger.error("Failed to archive transcript to channel %s: %s", archive_channel_id, e)
         
+        if transcript_html:
+            try:
+                storage_path, file_size = await self.bot.storage.save_transcript(
+                    ticket_id=ticket["id"],
+                    channel_name=channel.name,
+                    content=transcript_html,
+                )
+                
+                await self.bot.db.save_transcript(
+                    ticket_id=ticket["id"],
+                    user_discord_id=user_discord_id,
+                    channel_id=channel.id,
+                    storage_type=self.bot.storage.storage_type,
+                    storage_path=storage_path,
+                    file_size_bytes=file_size,
+                )
+                
+                logger.info(
+                    "Saved transcript for ticket %s to %s storage: %s",
+                    ticket["id"],
+                    self.bot.storage.storage_type,
+                    storage_path
+                )
+            except Exception as e:
+                logger.error("Failed to save transcript to storage for ticket %s: %s", ticket["id"], e)
+        
         return transcript_html
+
+    async def _generate_fallback_transcript(
+        self,
+        channel: discord.TextChannel,
+        ticket: dict,
+    ) -> str:
+        """Generate a simple text-based transcript when chat_exporter is unavailable."""
+        messages = []
+        try:
+            async for message in channel.history(limit=None, oldest_first=True):
+                timestamp = message.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+                author = f"{message.author.name}#{message.author.discriminator}"
+                content = message.content or "[No text content]"
+                
+                if message.attachments:
+                    attachments = ", ".join([att.url for att in message.attachments])
+                    content += f" [Attachments: {attachments}]"
+                
+                messages.append(f"[{timestamp}] {author}: {content}")
+        except Exception as e:
+            logger.error("Failed to fetch messages for fallback transcript: %s", e)
+            messages.append(f"[Error] Failed to fetch complete message history: {e}")
+        
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Ticket #{ticket['id']} Transcript</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; background: #2c2f33; color: #dcddde; }}
+        .header {{ background: #23272a; padding: 15px; border-radius: 5px; margin-bottom: 20px; }}
+        .message {{ margin: 10px 0; padding: 10px; background: #23272a; border-radius: 3px; }}
+        .timestamp {{ color: #72767d; font-size: 0.85em; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Ticket #{ticket['id']} - {channel.name}</h1>
+        <p>User: {ticket['user_discord_id']}</p>
+        <p>Created: {ticket['created_at']}</p>
+        <p><em>Note: This is a fallback transcript generated without chat_exporter</em></p>
+    </div>
+    <div class="messages">
+"""
+        
+        for msg in messages:
+            html_content += f'        <div class="message">{msg}</div>\n'
+        
+        html_content += """    </div>
+</body>
+</html>"""
+        
+        return html_content
 
     async def _send_inactivity_warning(
         self,
@@ -718,6 +798,92 @@ class TicketManagementCog(commands.Cog):
                 ephemeral=True
             )
             logger.error("Error closing ticket %s: %s", ticket["id"], e, exc_info=True)
+
+    @ticket_group.command(name="transcript", description="Retrieve a transcript for a closed ticket (admin only)")
+    @app_commands.describe(
+        ticket_id="The ticket ID to retrieve the transcript for",
+    )
+    async def ticket_transcript(
+        self,
+        interaction: discord.Interaction,
+        ticket_id: int,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "This command must be used in a server.", ephemeral=True
+            )
+            return
+
+        requester = self._resolve_member(interaction)
+        if not self._is_admin(requester):
+            await interaction.response.send_message(
+                "You do not have permission to use this command.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            transcript_record = await self.bot.db.get_transcript_by_ticket_id(ticket_id)
+            
+            if not transcript_record:
+                await interaction.followup.send(
+                    f"No transcript found for ticket #{ticket_id}. The ticket may not have been closed yet, or the transcript may not have been saved.",
+                    ephemeral=True
+                )
+                return
+
+            storage_type = transcript_record["storage_type"]
+            storage_path = transcript_record["storage_path"]
+            
+            transcript_bytes = await self.bot.storage.retrieve_transcript(storage_path, storage_type)
+            
+            if not transcript_bytes:
+                await interaction.followup.send(
+                    f"Transcript file not found for ticket #{ticket_id}. The file may have been deleted or moved.",
+                    ephemeral=True
+                )
+                return
+
+            ticket = await self.bot.db.get_ticket(ticket_id)
+            if ticket:
+                filename = f"ticket-{ticket_id}-transcript.html"
+            else:
+                filename = f"ticket-{ticket_id}-transcript.html"
+
+            transcript_file = discord.File(
+                BytesIO(transcript_bytes),
+                filename=filename
+            )
+
+            file_size_kb = len(transcript_bytes) / 1024
+            created_at = self._parse_timestamp(transcript_record["created_at"])
+
+            embed = create_embed(
+                title=f"Ticket #{ticket_id} Transcript",
+                description=(
+                    f"**Storage Type:** {storage_type}\n"
+                    f"**File Size:** {file_size_kb:.2f} KB\n"
+                    f"**Created:** {discord_timestamp(created_at, 'f')}\n"
+                    f"**User:** <@{transcript_record['user_discord_id']}>"
+                ),
+                color=discord.Color.blue(),
+                timestamp=True,
+            )
+
+            await interaction.followup.send(
+                embed=embed,
+                file=transcript_file,
+                ephemeral=True
+            )
+            logger.info("Retrieved transcript for ticket %s (requested by %s)", ticket_id, interaction.user.id)
+
+        except Exception as e:
+            await interaction.followup.send(
+                "An error occurred while retrieving the transcript. Please try again.",
+                ephemeral=True
+            )
+            logger.error("Error retrieving transcript for ticket %s: %s", ticket_id, e, exc_info=True)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
