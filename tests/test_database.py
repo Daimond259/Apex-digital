@@ -380,3 +380,197 @@ async def test_ticket_fields_persist_across_operations(db):
     assert ticket["type"] == "sales"
     assert ticket["order_id"] == 9999
     assert ticket["priority"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_migration_v6_extends_orders_table(db):
+    """Test that migration v6 adds new fields to orders table."""
+    # Check that new columns exist
+    cursor = await db._connection.execute("PRAGMA table_info(orders)")
+    columns = [row[1] for row in await cursor.fetchall()]
+    
+    assert "status" in columns
+    assert "warranty_expires_at" in columns
+    assert "last_renewed_at" in columns
+    assert "renewal_count" in columns
+
+
+@pytest.mark.asyncio
+async def test_create_order_with_status_and_warranty(db):
+    """Test creating orders with the new status and warranty fields."""
+    await db.ensure_user(54321)
+    
+    product_id = await db.create_product(
+        main_category="Test",
+        sub_category="Service",
+        service_name="Test Service",
+        variant_name="Test Variant",
+        price_cents=1000,
+    )
+    
+    order_id = await db.create_order(
+        user_discord_id=54321,
+        product_id=product_id,
+        price_paid_cents=800,
+        discount_applied_percent=20.0,
+        status="pending",
+        warranty_expires_at="2024-12-31 23:59:59",
+    )
+    
+    order = await db.get_order_by_id(order_id)
+    assert order is not None
+    assert order["status"] == "pending"
+    assert order["warranty_expires_at"] == "2024-12-31 23:59:59"
+    assert order["renewal_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_update_order_status(db):
+    """Test updating order status with validation."""
+    await db.ensure_user(65432)
+    
+    product_id = await db.create_product(
+        main_category="Test",
+        sub_category="Service",
+        service_name="Test Service",
+        variant_name="Test Variant",
+        price_cents=1000,
+    )
+    
+    order_id = await db.create_order(
+        user_discord_id=65432,
+        product_id=product_id,
+        price_paid_cents=1000,
+        discount_applied_percent=0.0,
+    )
+    
+    # Test valid status update
+    await db.update_order_status(order_id, "fulfilled")
+    order = await db.get_order_by_id(order_id)
+    assert order["status"] == "fulfilled"
+    
+    # Test invalid status raises error
+    with pytest.raises(ValueError, match="Invalid status"):
+        await db.update_order_status(order_id, "invalid_status")
+
+
+@pytest.mark.asyncio
+async def test_renew_order_warranty(db):
+    """Test warranty renewal functionality."""
+    await db.ensure_user(76543)
+    
+    product_id = await db.create_product(
+        main_category="Test",
+        sub_category="Service",
+        service_name="Test Service",
+        variant_name="Test Variant",
+        price_cents=1000,
+    )
+    
+    order_id = await db.create_order(
+        user_discord_id=76543,
+        product_id=product_id,
+        price_paid_cents=1000,
+        discount_applied_percent=0.0,
+        status="fulfilled",
+        warranty_expires_at="2024-12-31 23:59:59",
+    )
+    
+    # Test warranty renewal
+    await db.renew_order_warranty(
+        order_id, 
+        "2025-12-31 23:59:59", 
+        staff_discord_id=999999
+    )
+    
+    order = await db.get_order_by_id(order_id)
+    assert order["warranty_expires_at"] == "2025-12-31 23:59:59"
+    assert order["renewal_count"] == 1
+    assert order["last_renewed_at"] is not None
+    
+    # Check that warranty renewal was logged in transactions
+    transactions = await db.get_wallet_transactions(76543)
+    warranty_txn = next(
+        (t for t in transactions if t["transaction_type"] == "warranty_renewal"), 
+        None
+    )
+    assert warranty_txn is not None
+    assert warranty_txn["order_id"] == order_id
+    assert warranty_txn["staff_discord_id"] == 999999
+
+
+@pytest.mark.asyncio
+async def test_get_orders_expiring_soon(db):
+    """Test retrieving orders with expiring warranties."""
+    # Create user and product
+    await db.ensure_user(87654)
+    
+    product_id = await db.create_product(
+        main_category="Test",
+        sub_category="Service",
+        service_name="Test Service",
+        variant_name="Test Variant",
+        price_cents=1000,
+    )
+    
+    # Create order with warranty expiring soon
+    from datetime import datetime, timedelta
+    
+    future_date = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    order_id = await db.create_order(
+        user_discord_id=87654,
+        product_id=product_id,
+        price_paid_cents=1000,
+        discount_applied_percent=0.0,
+        status="fulfilled",
+        warranty_expires_at=future_date,
+    )
+    
+    # Test retrieving expiring orders
+    expiring_orders = await db.get_orders_expiring_soon(7)  # 7 days ahead
+    assert len(expiring_orders) >= 1
+    
+    expiring_order = next(
+        (o for o in expiring_orders if o["id"] == order_id), 
+        None
+    )
+    assert expiring_order is not None
+    assert expiring_order["user_discord_id"] == 87654
+
+
+@pytest.mark.asyncio
+async def test_get_active_orders(db):
+    """Test retrieving active (non-refunded) orders."""
+    await db.ensure_user(98765)
+    
+    product_id = await db.create_product(
+        main_category="Test",
+        sub_category="Service",
+        service_name="Test Service",
+        variant_name="Test Variant",
+        price_cents=1000,
+    )
+    
+    # Create multiple orders with different statuses
+    order1_id = await db.create_order(
+        user_discord_id=98765,
+        product_id=product_id,
+        price_paid_cents=1000,
+        discount_applied_percent=0.0,
+        status="fulfilled",
+    )
+    
+    order2_id = await db.create_order(
+        user_discord_id=98765,
+        product_id=product_id,
+        price_paid_cents=1000,
+        discount_applied_percent=0.0,
+        status="refunded",
+    )
+    
+    # Test active orders for specific user
+    active_orders = await db.get_active_orders(98765)
+    active_order_ids = [o["id"] for o in active_orders]
+    
+    assert order1_id in active_order_ids
+    assert order2_id not in active_order_ids  # Refunded order should not be included
