@@ -6,7 +6,8 @@ A feature-rich Discord bot for automated product distribution, ticketing, and VI
 
 - **Automated Product Distribution**: SQLite-backed product catalog with role assignments and content delivery
 - **VIP System**: Multi-tier VIP system with automatic discount application
-- **Wallet System**: Internal wallet with transaction tracking and lifetime spending
+- **Wallet System**: Internal wallet with transaction ledger tracking and lifetime spending history
+- **Order History**: Complete order and transaction history with pagination and ticket linking
 - **Ticket Lifecycle Automation**: Automatic ticket closure with inactivity warnings and HTML transcript export
 - **Operating Hours**: Configurable business hours with Discord timestamp formatting
 - **Payment Methods**: Flexible payment method configuration with custom instructions
@@ -137,6 +138,8 @@ async def _migration_v4(self) -> None:
 - **Version 1**: Base schema (users, products, discounts, tickets, orders tables)
 - **Version 2**: Migrate products table from old single-name schema to categorized schema
 - **Version 3**: Create performance indexes on discounts, tickets, and orders tables
+- **Version 4**: Extend tickets table with type, order_id, assigned_staff_id, closed_at, and priority columns
+- **Version 5**: Create wallet_transactions table for ledger tracking
 
 ### Users Table
 - `id`: Primary key
@@ -181,8 +184,13 @@ async def _migration_v4(self) -> None:
 - `user_discord_id`: Discord ID of ticket creator
 - `channel_id`: Discord channel ID (unique per ticket)
 - `status`: Ticket status (open, closed, etc.)
+- `type`: Ticket type (support, billing, sales)
+- `order_id`: Related order ID (NULL if not order-related)
+- `assigned_staff_id`: Discord ID of assigned staff member
+- `priority`: Ticket priority (low, medium, high, critical)
 - `last_activity`: Last activity timestamp
 - `created_at`: Ticket creation timestamp
+- `closed_at`: Ticket closure timestamp
 
 ### Orders Table
 - `id`: Primary key
@@ -192,6 +200,19 @@ async def _migration_v4(self) -> None:
 - `discount_applied_percent`: Discount percentage applied
 - `order_metadata`: JSON metadata about the order
 - `created_at`: Order creation timestamp
+
+### Wallet Transactions Table
+- `id`: Primary key
+- `user_discord_id`: Discord ID of the user
+- `amount_cents`: Transaction amount in cents (positive for credits, negative for debits)
+- `balance_after_cents`: Wallet balance after this transaction
+- `transaction_type`: Type of transaction (admin_credit, purchase, deposit, refund)
+- `description`: Human-readable transaction description
+- `order_id`: Related order ID (NULL if not order-related)
+- `ticket_id`: Related ticket ID (NULL if not ticket-related)
+- `staff_discord_id`: Discord ID of staff member who performed the transaction (for admin actions)
+- `metadata`: JSON metadata for proof, source, or additional information
+- `created_at`: Transaction timestamp
 
 ## Product Management
 
@@ -287,6 +308,31 @@ product_id = await self.bot.db.create_product(
     content_payload="https://example.com/content"
 )
 ```
+
+## Commands
+
+### User Commands
+
+- `/deposit` - Open a private deposit ticket with staff
+- `/balance` - Check your wallet balance and lifetime spending
+- `/orders [page]` - View your order history with pagination (10 orders per page)
+- `/transactions [page]` - View your wallet transaction history with pagination (10 transactions per page)
+- `/buy` - Browse and purchase products from the storefront
+
+### Admin Commands
+
+- `/addbalance <member> <amount> <reason>` - Credit funds to a member's wallet
+- `/balance <member>` - Check any member's wallet balance
+- `/orders <member> [page]` - View any member's order history
+- `/transactions <member> [page]` - View any member's wallet transaction history
+- `/import_products` - Bulk import products from CSV template
+- `/manualorder <member> <product_name> <price> [notes]` - Create a manual order (doesn't affect wallet)
+
+### Ticket Commands
+
+- `/close [reason]` - Close the current ticket with optional reason
+- `/assign <staff_member>` - Assign a ticket to a staff member
+- `/priority <level>` - Set ticket priority (low, medium, high, critical)
 
 ## Production Deployment
 
